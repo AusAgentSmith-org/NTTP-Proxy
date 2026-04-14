@@ -18,7 +18,32 @@ services:
       RUST_LOG: ${RUST_LOG:-info,nntp_proxy=debug}
     restart: unless-stopped
 
-  # ── NZB download test client ────────────────────────────────────────────────
+  # ── GUI (web UI on :8080) ────────────────────────────────────────────────────
+  # Pre-build the binary on the host:
+  #   (cd gui && cargo build --release)
+  gui:
+    build:
+      context: ./gui
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./downloads:/downloads
+      - ./logs:/logs
+    environment:
+      NNTP_HOST: nntp-proxy
+      NNTP_PORT: "119"
+      NNTP_USER: "guiuser"
+      NNTP_PASS: "guipass"
+      NNTP_CONNECTIONS: "8"
+      NNTP_SSL: "false"
+      MAX_ACTIVE_DOWNLOADS: "2"
+      RUST_LOG: ${RUST_LOG:-info,nzb_web=debug,nzb_nntp=info}
+    depends_on:
+      - nntp-proxy
+    restart: unless-stopped
+
+  # ── NZB download test client (CLI, same downloader) ──────────────────────────
   # Pre-build the binary on the host before running docker compose build:
   #   (cd client && cargo build --release)
   # Scale with: docker compose up --scale client=3

@@ -1,9 +1,10 @@
 # nzbservice — Usenet proxy POC
 
-Two components:
+Three components:
 
 - **`nntp-proxy`** (this dir root) — Rust binary that accepts plain NNTP on :119 and brokers all client traffic through an authenticated TLS connection pool to a single upstream Usenet server. Credential substitution + pass-through of all NNTP commands including multi-line article/xover responses.
-- **`client/`** — copy of `NZBFailTest`, reused as the test client. Env-var-configurable so multiple containers can each point at the proxy and download NZBs.
+- **`gui/`** — web UI (Axum + plain HTML/JS) at http://localhost:8080: upload `.nzb` files, watch the queue, search stub. Downloads route through the proxy.
+- **`client/`** — headless CLI client (ported from `NZBFailTest`). Useful for automated/repeatable testing; scale with `--scale client=N`.
 
 ## Layout
 
@@ -12,10 +13,16 @@ nzbservice/
 ├── src/                 nntp-proxy source
 ├── Cargo.toml           nntp-proxy manifest
 ├── Dockerfile           nntp-proxy Dockerfile (builds from source)
-├── docker-compose.yml   proxy + scalable clients
-├── nzbs/                drop .nzb files here
-├── downloads/           clients write completed downloads here
-└── client/              test client
+├── docker-compose.yml   proxy + gui + scalable clients
+├── nzbs/                drop .nzb files here (for the CLI client)
+├── downloads/           shared — gui + client write completed downloads here
+├── logs/                per-service rolling logs
+├── gui/                 web UI
+│   ├── src/             Axum backend (upload, queue, stub search)
+│   ├── static/          index.html + app.js + styles.css
+│   ├── Cargo.toml
+│   └── Dockerfile       packages pre-built binary + static assets
+└── client/              headless CLI client
     ├── src/
     ├── Cargo.toml
     ├── Cargo.lock
@@ -26,11 +33,11 @@ nzbservice/
 
 ```bash
 # Proxy builds fully inside Docker (only uses public crates).
-# Client must be pre-built on the host since its deps live on the private
-# Forgejo registry (unreachable inside Docker):
+# Client and GUI depend on the private Forgejo registry — pre-build on host:
 (cd client && cargo build --release)
+(cd gui && cargo build --release)
 
-mkdir -p nzbs downloads
+mkdir -p nzbs downloads logs
 cp /path/to/your/*.nzb nzbs/
 ```
 
@@ -38,9 +45,11 @@ cp /path/to/your/*.nzb nzbs/
 
 ```bash
 docker compose build
-docker compose up                  # 1 client
-docker compose up --scale client=3 # 3 clients sharing the 15-slot proxy pool
+docker compose up                  # proxy + gui + 1 CLI client
+docker compose up --scale client=3 # add more CLI clients, all sharing the 15-slot pool
 ```
+
+Then open http://localhost:8080 for the GUI.
 
 ## Config
 

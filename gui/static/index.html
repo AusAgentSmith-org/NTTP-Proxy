@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nzbservice</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <h1>nzbservice</h1>
+    <nav>
+      <button class="tab active" data-tab="queue">Queue</button>
+      <button class="tab" data-tab="upload">Upload</button>
+      <button class="tab" data-tab="search">Search</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ─── QUEUE ─────────────────────────────────────────────────────────── -->
+    <section id="tab-queue" class="tab-panel active">
+      <h2>Active</h2>
+      <div id="active-empty" class="empty hidden">No active downloads.</div>
+      <table id="active-table" class="jobs">
+        <thead>
+          <tr><th>Name</th><th>Status</th><th>Progress</th><th>Articles</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <h2>Recent</h2>
+      <div id="history-empty" class="empty hidden">Nothing here yet.</div>
+      <table id="history-table" class="jobs">
+        <thead>
+          <tr><th>Name</th><th>Status</th><th>Size</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <!-- ─── UPLOAD ────────────────────────────────────────────────────────── -->
+    <section id="tab-upload" class="tab-panel">
+      <h2>Upload NZB files</h2>
+      <div id="dropzone" class="dropzone">
+        <p>Drag &amp; drop <code>.nzb</code> files here</p>
+        <p class="muted">or</p>
+        <label class="button">
+          <input type="file" id="file-input" multiple accept=".nzb,application/x-nzb" hidden>
+          Choose files…
+        </label>
+      </div>
+      <div id="upload-result"></div>
+    </section>
+
+    <!-- ─── SEARCH (stubbed) ──────────────────────────────────────────────── -->
+    <section id="tab-search" class="tab-panel">
+      <h2>Search</h2>
+      <form id="search-form" autocomplete="off">
+        <input type="text" id="search-q" placeholder="Search term — e.g. movie or show title"
+               disabled>
+        <button type="submit" disabled>Search</button>
+      </form>
+      <div class="notice">
+        Search is <strong>not implemented yet</strong>. Integration with
+        <code>nzb.indexarr</code> is pending. For now, upload <code>.nzb</code>
+        files via the Upload tab.
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
