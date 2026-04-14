@@ -16,13 +16,13 @@ services:
       RUST_LOG: ${RUST_LOG:-info,nntp_proxy=debug}
     restart: unless-stopped
 
-  # ── NZBFailTest client ──────────────────────────────────────────────────────
+  # ── NZB download test client ────────────────────────────────────────────────
   # Pre-build the binary on the host before running docker compose build:
-  #   cd ~/Working/apps/Arz/NZBFailTest && cargo build --release
+  #   (cd client && cargo build --release)
   # Scale with: docker compose up --scale client=3
   client:
     build:
-      context: ../Arz/NZBFailTest  # pre-built binary must exist at target/release/
+      context: ./client            # pre-built binary must exist at client/target/release/
       dockerfile: Dockerfile
     volumes:
       - ./nzbs:/nzbs:ro           # drop .nzb files here

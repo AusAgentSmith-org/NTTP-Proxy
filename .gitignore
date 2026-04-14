@@ -1,0 +1,5 @@
+target/
+nzbs/
+downloads/
+*.swp
+.env
