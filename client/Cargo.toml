@@ -27,5 +27,6 @@ nzb-postproc = { version = "0.2.2", registry = "forgejo" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }

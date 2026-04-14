@@ -7,6 +7,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "1119:119"        # host:container — use 1119 to avoid needing root on host
+    volumes:
+      - ./logs:/logs
     environment:
       NNTP_HOST: ${NNTP_HOST:-aunews.frugalusenet.com}
       NNTP_PORT: ${NNTP_PORT:-563}
@@ -27,6 +29,7 @@ services:
     volumes:
       - ./nzbs:/nzbs:ro           # drop .nzb files here
       - ./downloads:/downloads    # completed downloads land here
+      - ./logs:/logs              # per-container log file lands here
     environment:
       NNTP_HOST: nntp-proxy
       NNTP_PORT: "119"
