@@ -1,0 +1,43 @@
+services:
+
+  # ── NNTP Proxy ──────────────────────────────────────────────────────────────
+  nntp-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "1119:119"        # host:container — use 1119 to avoid needing root on host
+    environment:
+      NNTP_HOST: ${NNTP_HOST:-aunews.frugalusenet.com}
+      NNTP_PORT: ${NNTP_PORT:-563}
+      NNTP_USER: ${NNTP_USER:-sprooty}
+      NNTP_PASS: ${NNTP_PASS:-3MemP7tRt}
+      NNTP_CONNECTIONS: ${NNTP_CONNECTIONS:-15}
+      RUST_LOG: ${RUST_LOG:-info,nntp_proxy=debug}
+    restart: unless-stopped
+
+  # ── NZBFailTest client ──────────────────────────────────────────────────────
+  # Build context = ~/Working so local lib [patch] sections are resolved.
+  # Pre-build on host first: cd ~/Working/apps/Arz/NZBFailTest && cargo build --release
+  # Scale with: docker compose up --scale client=3
+  client:
+    build:
+      context: ../..              # ~/Working
+      dockerfile: apps/Arz/NZBFailTest/Dockerfile
+    volumes:
+      - ./nzbs:/nzbs:ro           # drop .nzb files here
+      - ./downloads:/downloads    # completed downloads land here
+    environment:
+      NNTP_HOST: nntp-proxy
+      NNTP_PORT: "119"
+      NNTP_USER: "testuser"
+      NNTP_PASS: "testpass"
+      NNTP_CONNECTIONS: "8"       # each client uses 8 of the 15 proxy slots
+      NNTP_SSL: "false"
+      BASE_DIR: /downloads
+      NZB_DIR: /nzbs
+      NZB_FILTER: ${NZB_FILTER:-all}
+      RUST_LOG: ${RUST_LOG:-info,nzb_web=debug,nzb_nntp=debug}
+    depends_on:
+      - nntp-proxy
+    restart: "no"                 # exit when download finishes
