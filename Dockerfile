@@ -11,7 +11,7 @@ COPY src/ src/
 RUN cargo build --release
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/target/release/nntp-proxy /usr/local/bin/nntp-proxy
