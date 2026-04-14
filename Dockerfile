@@ -1,5 +1,5 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM rust:1.82-slim AS builder
+FROM rust:1.85-slim AS builder
 
 # System deps for ring / aws-lc-rs
 RUN apt-get update && apt-get install -y cmake pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
