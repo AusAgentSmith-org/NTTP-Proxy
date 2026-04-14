@@ -17,13 +17,13 @@ services:
     restart: unless-stopped
 
   # ── NZBFailTest client ──────────────────────────────────────────────────────
-  # Build context = ~/Working so local lib [patch] sections are resolved.
-  # Pre-build on host first: cd ~/Working/apps/Arz/NZBFailTest && cargo build --release
+  # Pre-build the binary on the host before running docker compose build:
+  #   cd ~/Working/apps/Arz/NZBFailTest && cargo build --release
   # Scale with: docker compose up --scale client=3
   client:
     build:
-      context: ../..              # ~/Working
-      dockerfile: apps/Arz/NZBFailTest/Dockerfile
+      context: ../Arz/NZBFailTest  # pre-built binary must exist at target/release/
+      dockerfile: Dockerfile
     volumes:
       - ./nzbs:/nzbs:ro           # drop .nzb files here
       - ./downloads:/downloads    # completed downloads land here
