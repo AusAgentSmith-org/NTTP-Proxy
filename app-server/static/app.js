@@ -57,6 +57,13 @@ const fmtBytes = (n) => {
   return `${v.toFixed(v < 10 ? 1 : 0)} ${u[i]}`;
 };
 
+const fmtRate = (bps) => {
+  if (!bps) return '—';
+  if (bps < 1024) return `${bps} B/s`;
+  if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(0)} KB/s`;
+  return `${(bps / 1024 / 1024).toFixed(1)} MB/s`;
+};
+
 const fmtAgo = (iso) => {
   if (!iso) return '—';
   const ageSecs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
@@ -97,6 +104,7 @@ async function refreshUsers() {
           <span class="${u.active_sessions > 0 ? 'live' : ''}">${u.active_sessions}</span>
           / ${u.max_connections}
         </td>
+        <td class="num ${u.bytes_per_sec > 0 ? 'live' : ''}">${fmtRate(u.bytes_per_sec)}</td>
         <td class="num">${fmtBytes(u.bytes_total)}</td>
         <td class="num">${u.total_sessions}</td>
         <td class="num">${fmtAgo(u.last_seen)}</td>

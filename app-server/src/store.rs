@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -38,6 +39,10 @@ pub struct User {
     pub bytes_total: u64,
     pub active_sessions: u32,
     pub total_sessions: u64,
+    /// Current throughput in bytes/sec, derived from the last activity
+    /// report's `bytes_delta` and the elapsed wall-clock since the previous
+    /// report. 0 if no report in the last 15s.
+    pub bytes_per_sec: u64,
 }
 
 impl User {
@@ -68,8 +73,16 @@ fn verify_password(stored: &str, password: &str) -> bool {
 
 pub struct Store {
     conn: Mutex<Connection>,
-    /// Runtime-only active-session count per user. Overlay on top of DB reads.
-    active: RwLock<HashMap<String, u32>>,
+    /// Runtime metrics overlaid on top of DB reads. Reset on restart.
+    runtime: RwLock<HashMap<String, RuntimeMetrics>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RuntimeMetrics {
+    active_sessions: u32,
+    bytes_per_sec: u64,
+    /// Instant of the last activity report for this user. Used to derive rate.
+    last_report: Option<Instant>,
 }
 
 impl Store {
@@ -101,7 +114,7 @@ impl Store {
         info!(path = %path.as_ref().display(), "SQLite store ready");
         Ok(Self {
             conn: Mutex::new(conn),
-            active: RwLock::new(HashMap::new()),
+            runtime: RwLock::new(HashMap::new()),
         })
     }
 
@@ -116,22 +129,22 @@ impl Store {
                  FROM users ORDER BY username",
             )
             .expect("prepare list");
-        let active = self.active.read();
+        let runtime = self.runtime.read();
         let rows = stmt
-            .query_map([], |row| row_to_user(row, &active))
+            .query_map([], |row| row_to_user(row, &runtime))
             .expect("query list");
         rows.filter_map(Result::ok).collect()
     }
 
     pub fn get(&self, username: &str) -> Option<User> {
         let conn = self.conn.lock();
-        let active = self.active.read();
+        let runtime = self.runtime.read();
         conn.query_row(
             "SELECT username, password_hash, max_connections, locked,
                     created_at, last_seen, bytes_total, total_sessions
              FROM users WHERE username = ?",
             [username],
-            |row| row_to_user(row, &active),
+            |row| row_to_user(row, &runtime),
         )
         .optional()
         .ok()
@@ -174,7 +187,7 @@ impl Store {
         let conn = self.conn.lock();
         // Also scrub in-memory runtime state
         drop(conn);
-        self.active.write().remove(username);
+        self.runtime.write().remove(username);
         let conn = self.conn.lock();
         conn.execute("DELETE FROM users WHERE username = ?", [username])
             .unwrap_or(0)
@@ -201,16 +214,38 @@ impl Store {
             == 1
     }
 
-    /// Apply a periodic activity report from the proxy. For each entry:
-    /// update runtime active_sessions, and accumulate bytes + sessions +
-    /// last_seen in the DB.
+    /// Apply a periodic activity report from the proxy.
+    ///
+    /// Runtime: updates active_sessions; computes bytes_per_sec from the
+    /// elapsed wall-clock since the previous report for this user.
+    /// Persisted: accumulates bytes_total + total_sessions, updates last_seen.
     pub fn apply_activity(&self, entries: &[ActivityEntry]) {
+        let now = Instant::now();
         let now_str = Utc::now().to_rfc3339();
 
         {
-            let mut active = self.active.write();
+            let mut rt = self.runtime.write();
             for e in entries {
-                active.insert(e.username.clone(), e.active_sessions);
+                let prev = rt.get(&e.username).copied().unwrap_or_default();
+                let bps = match prev.last_report {
+                    Some(t) => {
+                        let secs = now.duration_since(t).as_secs_f64();
+                        if secs > 0.01 {
+                            (e.bytes_delta as f64 / secs) as u64
+                        } else {
+                            0
+                        }
+                    }
+                    None => 0,
+                };
+                rt.insert(
+                    e.username.clone(),
+                    RuntimeMetrics {
+                        active_sessions: e.active_sessions,
+                        bytes_per_sec: bps,
+                        last_report: Some(now),
+                    },
+                );
             }
         }
 
@@ -233,17 +268,36 @@ impl Store {
         }
         tx.commit().expect("commit activity tx");
     }
+
+    /// Decay stale rates. Called periodically so users that stop reporting
+    /// don't keep showing an old bytes_per_sec.
+    pub fn decay_stale_rates(&self, max_age_secs: u64) {
+        let now = Instant::now();
+        let mut rt = self.runtime.write();
+        for m in rt.values_mut() {
+            if m.bytes_per_sec > 0
+                && m.last_report
+                    .map(|t| now.duration_since(t).as_secs() > max_age_secs)
+                    .unwrap_or(true)
+            {
+                m.bytes_per_sec = 0;
+                m.active_sessions = 0;
+            }
+        }
+    }
 }
 
 fn row_to_user(
     row: &rusqlite::Row<'_>,
-    active: &HashMap<String, u32>,
+    runtime: &HashMap<String, RuntimeMetrics>,
 ) -> rusqlite::Result<User> {
     let username: String = row.get(0)?;
     let created_at_str: String = row.get(4)?;
     let last_seen_str: Option<String> = row.get(5)?;
+    let rt = runtime.get(&username).copied().unwrap_or_default();
     Ok(User {
-        active_sessions: active.get(&username).copied().unwrap_or(0),
+        active_sessions: rt.active_sessions,
+        bytes_per_sec: rt.bytes_per_sec,
         username,
         password_hash: row.get(1)?,
         max_connections: row.get::<_, i64>(2)? as u32,

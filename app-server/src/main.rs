@@ -72,6 +72,19 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState { store, config });
 
+    // Decay stale throughput for users we stop hearing from. Keeps the
+    // admin UI honest: no reports in 15s → rate drops to 0.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                state.store.decay_stale_rates(15);
+            }
+        });
+    }
+
     let admin_routes = Router::new()
         .route("/api/admin/users", get(h_admin_users).post(h_admin_create_user))
         .route("/api/admin/users/{username}", delete(h_admin_delete_user))
