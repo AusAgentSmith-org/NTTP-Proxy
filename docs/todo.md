@@ -61,14 +61,20 @@ Rough priority order, top = next. Scratchpad. Prune as things change.
       in `/data/tls/fingerprint`, and via app-server `GET /api/fingerprint`.
       Session handler made generic over transport so plain + TLS share
       one code path.
+- [x] **nzb-nntp: trusted_fingerprint support** (lib 0.2.13). Any
+      consumer of nzb-nntp can now pin a server cert by fingerprint.
+      Field is optional, serde-defaulted, fully backward compatible.
 
 ## Next up — internet rollout
 
-- [ ] **Cert fingerprint pinning in the bundled client.** We control the
-      binaries — embed the expected fingerprint at build time or fetch
-      it from `GET /api/fingerprint` once at install. rustls
-      `ServerCertVerifier` checks fingerprint only; no CA chain, no
-      Let's Encrypt. Server side is ready (see recently done above).
+- [ ] **Design the bundled end-user client binary.** Plumbing is done
+      server-side (NNTPS + FP endpoint) and lib-side (nzb-nntp
+      trusted_fingerprint). What's missing is the UX of the bundled
+      binary itself: first-launch fingerprint fetch from
+      `GET /api/fingerprint`, local storage, NNTP ServerConfig built
+      with `ssl=true, trusted_fingerprint=<pinned>, port=563`,
+      session-key acquisition via `POST /api/auth/login`. Think of it
+      as `client/` but doing its own logging-in to the app-server first.
 - [ ] **Gui → NNTPS.** Currently the gui hits the proxy on :119 plain.
       When everything's on one host this is fine; for a split
       deployment (proxy on public VM, gui elsewhere) the gui's
