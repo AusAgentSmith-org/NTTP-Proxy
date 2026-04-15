@@ -55,7 +55,7 @@ function renderActive(jobs) {
     const cls = pillClass(j.status);
     const failCls = j.articles_failed > 0 ? 'failed' : (pct >= 99.9 ? 'complete' : '');
     return `
-      <tr>
+      <tr data-job-id="${escapeHtml(j.id)}">
         <td class="name">${escapeHtml(j.name)}</td>
         <td><span class="status-pill ${cls}">${escapeHtml(j.status)}</span></td>
         <td style="min-width: 220px;">
@@ -65,10 +65,33 @@ function renderActive(jobs) {
           </div>
         </td>
         <td class="num">${j.articles_downloaded} / ${j.article_count}${j.articles_failed > 0 ? ` (${j.articles_failed} failed)` : ''}</td>
+        <td class="actions">
+          <button class="icon-btn cancel" title="Cancel download" data-action="cancel">✕</button>
+        </td>
       </tr>
     `;
   }).join('');
 }
+
+// Event delegation for cancel buttons
+document.querySelector('#active-table tbody').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action="cancel"]');
+  if (!btn) return;
+  const row = btn.closest('tr');
+  const id = row.dataset.jobId;
+  if (!id) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch(`/api/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!r.ok) throw new Error(await r.text());
+    refreshQueue();
+  } catch (err) {
+    console.error('cancel failed', err);
+    btn.disabled = false;
+    btn.textContent = '✕';
+  }
+});
 
 function renderHistory(jobs) {
   const body = document.querySelector('#history-table tbody');

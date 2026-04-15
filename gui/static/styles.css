@@ -126,6 +126,33 @@ table.jobs td.num { font-variant-numeric: tabular-nums; color: var(--muted); }
 .status-pill.completed   { background: #0f2b1a; color: var(--ok); }
 .status-pill.failed      { background: #3a1514; color: var(--err); }
 
+/* ── Row actions ──────────────────────────────────────────────────────── */
+
+table.jobs th.actions-col { width: 40px; }
+table.jobs td.actions { text-align: right; padding-right: .6rem; }
+
+.icon-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: .9rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all .15s;
+}
+.icon-btn:hover {
+  color: var(--err);
+  border-color: var(--err);
+  background: #3a1514;
+}
+.icon-btn:disabled { opacity: .5; cursor: wait; }
+
 /* ── Dropzone ─────────────────────────────────────────────────────────── */
 
 .dropzone {

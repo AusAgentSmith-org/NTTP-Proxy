@@ -14,9 +14,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Query, State};
+use axum::extract::{Multipart, Path as AxumPath, Query, State};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
@@ -215,6 +215,17 @@ struct SearchQuery {
     q: Option<String>,
 }
 
+async fn h_cancel(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    info!(%id, "cancel requested");
+    st.queue
+        .remove_job(&id)
+        .map_err(|e| (StatusCode::NOT_FOUND, format!("remove_job: {e}")))?;
+    Ok(Json(serde_json::json!({ "removed": id })))
+}
+
 async fn h_search(Query(q): Query<SearchQuery>) -> Json<serde_json::Value> {
     // Stub — real implementation will hit nzb.indexarr once available.
     Json(serde_json::json!({
@@ -286,6 +297,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/api/queue", get(h_queue))
         .route("/api/upload", post(h_upload))
+        .route("/api/jobs/{id}", delete(h_cancel))
         .route("/api/search", get(h_search))
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
