@@ -85,6 +85,10 @@ pub async fn handle(
         if upper.starts_with("QUIT") {
             write_client(&mut client, b"205 closing connection - goodbye!\r\n").await?;
             info!(%peer, user = ?auth_user, "session closed by client QUIT");
+            // Clean exit: return upstream conn to idle pool for reuse.
+            if let Some(up) = upstream.take() {
+                up.release_clean();
+            }
             return Ok(());
         }
 

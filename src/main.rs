@@ -54,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         "nntp-proxy starting"
     );
 
-    let pool = Arc::new(pool::UpstreamPool::new(Arc::clone(&cfg)));
+    let pool = pool::UpstreamPool::new(Arc::clone(&cfg));
     let user_pool = Arc::new(UserPool::new());
 
     let app_client = if cfg.app_server_enabled() {
