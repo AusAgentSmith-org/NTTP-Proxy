@@ -1,143 +1,148 @@
 # Architecture
 
-## Target system
+## Where we are
+
+The original target system has four pieces: a Client App, an NZB search service,
+a UsenetServer Proxy, and a central App Server. **All four exist now**, with
+caveats:
 
 ```
-                    ┌───────────────────┐
-                    │    Client App     │
-                    └────┬────┬─────┬───┘
-           NNTP (proxied) │    │     │  HTTP
-                          │    │     │
-  ┌───────────────────────▼─┐  │     └─────────────┐
-  │   UsenetServer Proxy    │  │  HTTP            ▼
-  │  (this repo)            │  │        ┌──────────────────────┐
-  │  • per-user auth        │  │        │  nzb.indexarr        │
-  │  • outbound pool to     │  │        │  (NZB search)        │
-  │    provider accounts    │  │        └──────────┬───────────┘
-  │  • usage metering       │  │                   │
-  └──────────┬──────────────┘  │                   │ credential
-             │ NNTP/TLS        │                   │ provisioning
-             ▼                 │                   │
-    ┌─────────────────┐        │                   │
-    │ Usenet Provider │        ▼                   ▼
-    └─────────────────┘   ┌─────────────────────────────────┐
-                          │          App Server             │
-                          │  • user auth / sessions         │
-                          │  • issue nzb.indexarr API keys  │
-                          │  • per-user NNTP credentials    │
-                          │  • track per-user usage (GB,    │
-                          │    connections, active sessions)│
-                          └─────────────────────────────────┘
+                        ┌─────────────────────────┐
+                        │       App Server        │ :8090
+                        │  • user accounts        │
+                        │  • per-user max_conns   │
+                        │  • lock control         │
+                        │  • activity tracking    │
+                        │  • admin UI             │
+                        └─────┬────────────┬──────┘
+                  validate    │            │   activity / locked
+                       (proxy)│            │   (proxy)
+            ┌──────────────────┴───┐    ┌──┴────────┐
+            │  Client App (gui)     │    │ nntp-proxy │ :1119
+            │  :8080                │    │  • TLS pool│
+            │  • upload nzb         │    │  • per-user│
+            │  • queue + cancel     │    │    cap     │
+            │  • search/grab via    │    │  • lock-on-│
+            │    nzb.indexarr       │    │    fly drop│
+            └──────────────────┬───┘    └─────┬──────┘
+                               │ NNTP :119     │ NNTP/TLS :563
+                               └───────┬───────┘
+                                       ▼
+                               ┌──────────────┐
+                               │   Usenet     │
+                               │   Provider   │
+                               └──────────────┘
+                                       │
+                                  search / grab
+                                       │
+                            ┌──────────▼──────────┐
+                            │ nzb.indexarr        │  external — already deployed
+                            │ (search + nzb fetch)│
+                            └─────────────────────┘
 ```
 
-**Intent.** End users consume Usenet (search + download) through infrastructure
-we control. Upstream Usenet provider accounts are owned by us, not users — so
-most Usenet providers' "no account sharing" terms are a constraint we design
-around, either via commercial reseller arrangements or a pool of consumer
-accounts behind the proxy. Either way, from the provider's perspective, all
-traffic comes from our infrastructure.
+**What's still notional / deferred**
 
-## Scope of the POC
+- App-server state is **in-memory** — restart loses users.
+- Auth between gui ↔ app-server: **not implemented** for end-users; the gui hardcodes a single set of credentials from env. Admin uses a shared `ADMIN_TOKEN`. Per-user web login is a TODO.
+- Article cache, multi-account upstream, regional proxies — all deferred. See `todo.md`.
 
-Only the **UsenetServer Proxy** component exists today. Everything else (App
-Server, `nzb.indexarr` integration, user management, billing) is deferred.
+## Component responsibilities
 
-```
-nzbservice/
-├── src/            nntp-proxy binary (Rust, tokio, tokio-rustls)
-├── client/         test client — NZBFailTest ported to env-var config
-└── docker-compose.yml
-```
+### `app-server` — source of truth
 
-The POC proves out the **mechanics** of NNTP proxying: accept plaintext NNTP
-from clients, authenticate upstream via TLS with our credentials, forward
-commands transparently, share one upstream account across many clients.
+In-memory `HashMap<username, User>` behind a `parking_lot::RwLock`. Each user
+has `username`, salted-SHA256 `password_hash`, `max_connections`, `locked`, and
+runtime fields populated from proxy activity reports (`active_sessions`,
+`bytes_total`, `last_seen`).
 
-## Proxy internals
+Two HTTP surfaces, both bearer-authed:
 
-One session per client TCP connection. Two phases.
+- **Admin** (`ADMIN_TOKEN`) — list/create/delete users, lock/unlock,
+  set max_connections, view activity. Used by the admin HTML UI.
+- **Proxy** (`PROXY_TOKEN`) — `validate(username, password) → {allowed, max_connections}`,
+  `activity(entries[]) → ok`, `locked() → [usernames]`. Used by the proxy.
 
-**Phase 1 — auth handshake.** The proxy speaks NNTP directly. Client credentials
-are accepted but not (yet) validated against a user database — today any
-`AUTHINFO PASS` triggers a pool acquire.
+A bootstrap user (`BOOTSTRAP_USER`/`BOOTSTRAP_PASS`) is created on first start
+so the gui + client work without any manual setup.
 
-```
-← client connects
-→ 200 nntp-proxy ready
-← AUTHINFO USER alice
-→ 381 Password required
-← AUTHINFO PASS *
-  [acquire upstream slot — creates TLS connection to provider,
-   authenticates with our credentials, connection is now Ready]
-→ 281 Authentication accepted
-```
+### `nntp-proxy` — credential-substituting connection broker
 
-**Phase 2 — pass-through.** Every command and response is forwarded byte-for-byte.
-The proxy reads one response line, parses the status code, and if it's a
-multi-line response (220, 222, 224, …) reads until `.\r\n` and forwards the
-whole body.
+Two phases per client TCP connection (unchanged from before, plus auth gate):
 
-```
-← BODY <message-id@host>
-→ BODY <message-id@host>            (to upstream)
-← 222 0 <message-id> article data   (from upstream)
-← <~750 KB of yEnc>                 (from upstream, multi-line)
-← .\r\n
-→ forward all to client
-```
+1. **Auth.** `AUTHINFO USER` caches the username, `AUTHINFO PASS` calls
+   `app-server /api/proxy/validate`. On reject → `481`. On accept → acquire
+   a per-user semaphore permit (cap = `max_connections` from app-server),
+   then acquire an upstream provider connection (TLS + AUTH using the
+   shared `NNTP_USER`/`NNTP_PASS` from env).
+2. **Pass-through.** Forward client commands → upstream, read upstream
+   response, forward back. Multi-line responses (`220`, `222`, `224`, …)
+   forwarded byte-for-byte until `.\r\n`.
 
-### Connection pool
+**Two background tasks** added for app-server integration:
 
-`Arc<tokio::sync::Semaphore>` capped at `NNTP_CONNECTIONS`. Each client session
-holds one permit for its lifetime, so N client TCP connections require N
-upstream connections (up to the cap). Connections are created on demand — no
-pre-warming — and dropped when the client disconnects.
+- **Activity reporter** (every `REPORT_INTERVAL_SECS`, default 5s) drains
+  per-user counters from `UserPool` and POSTs to `/api/proxy/activity`.
+- **Lock poller** (every `LOCK_POLL_INTERVAL_SECS`, default 2s) GETs
+  `/api/proxy/locked` and trips the cancel signal on every active session
+  for any locked user. Sessions exit cleanly with `482 Account locked`.
 
-### What the proxy does *not* do yet
+Run with `APP_SERVER_URL` empty for **open mode** — no auth, no caps, no
+reporting. Used for local debugging.
 
-- **User authentication.** AUTHINFO PASS is accepted without validation.
-- **Article caching.** Two clients downloading the same NZB each fetch the
-  same articles — no de-duplication.
-- **Usage tracking.** No metering of GB/connections per client.
-- **TLS to clients.** Clients connect in plaintext. Fine on a private
-  network; not fine over the internet.
-- **Connection reuse across sessions.** Upstream connections are closed when
-  the client disconnects, even though the `NntpConnection` is still authenticated
-  and healthy.
+#### Per-user pool
 
-## Technical choices
+`user_pool.rs` holds a `HashMap<username, UserSlot>`. Each slot has a
+`tokio::sync::Semaphore` sized to `max_connections`, plus a registry of
+session ids → `oneshot::Sender<()>` for cancellation. When the cap changes,
+the semaphore is replaced; in-flight sessions keep their old permit until
+they exit.
 
-| Area | Choice | Reason |
-|---|---|---|
-| Language | Rust | Matches surrounding stack (`nzb-*` crates, `Arz`). No GC pauses on a long-running proxy. |
-| Async runtime | Tokio | Standard in the stack. |
-| TLS | `tokio-rustls` + `webpki-roots` | Same deps as `nzb-nntp`, no OpenSSL. |
-| Upstream protocol | Raw TLS + hand-rolled NNTP I/O | `nzb-nntp::NntpConnection` has no raw send/recv API; its high-level methods (`fetch_body` etc.) return parsed structs that would need re-encoding. Raw I/O is simpler and avoids re-stuffing dot-escapes on the forwarding path. |
-| Client protocol | Plain TCP | POC scope; TLS termination is trivial to add later with `tokio-rustls` server mode. |
-| Logging | `tracing` + `tracing-appender` daily rolling | Each container gets its own log file in `/logs/`; stdout stays clean so `docker logs` isn't a firehose. |
+### `gui` — web client
 
-## Deployment shape (target)
+Axum backend, plain HTML/JS/CSS frontend. Three tabs:
 
-Single Hetzner dedicated box is the current thinking, with high/unmetered
-bandwidth. Revisit once real user count and per-user usage are known.
+- **Queue** — polls `/api/queue` every 2s, shows active + recent. Each row
+  has a ✕ button → `DELETE /api/jobs/:id` → `QueueManager::remove_job`.
+- **Upload** — drag/drop multi-file → `POST /api/upload` → `parse_nzb` →
+  `add_job`.
+- **Search** — `GET /api/search?q=…` proxies to `nzb.indexarr` `/api/releases`.
+  Each result has a ↓ button → `POST /api/grab/:id` → fetches the NZB from
+  indexarr, parses, enqueues.
 
-- **Proxy:** one instance, high-bandwidth egress box. Client connections are
-  plaintext internal to the datacentre, or behind a TLS termination at the edge.
-- **App Server:** separate Hetzner VM. Stateful (postgres), lower traffic.
-- **`nzb.indexarr`:** existing Indexarr deployment.
+Reuses `nzb-web::QueueManager` for the actual download work — same engine
+the CLI client uses.
 
-Global routing (users outside EU) is **deferred**. NNTP's multi-connection
-nature masks most of the latency penalty for remote users. Add regional proxies
-via GeoDNS only when a specific region generates enough traffic to justify it.
+### `client` — CLI test harness
 
-## Bandwidth reality check
+Headless port of NZBFailTest. Reads NZBs from `/nzbs`, processes per
+`NZB_FILTER`. Used for repeatable load tests; scale arbitrarily with
+`--scale client=N`.
 
-Rough math for sizing the egress box:
+## Networking
+
+All three application services live on the default compose bridge network.
+Only the service ports are published to the host:
+
+| Container | Internal | Host | Reason |
+|---|---|---|---|
+| nntp-proxy | `:119` | `:1119` | unprivileged port on host |
+| gui | `:8080` | `:8080` | direct |
+| app-server | `:8090` | `:8090` | direct |
+
+Inter-service traffic uses container DNS (`http://app-server:8090`,
+`nntp-proxy:119`).
+
+## Deployment shape (target — unchanged)
+
+Single Hetzner dedicated box, high/unmetered bandwidth. App-server +
+nntp-proxy + gui all colocated. Revisit once user count is real.
+
+## Bandwidth reality (unchanged)
 
 - 1 heavy user sustained ≈ 150–300 Mbit/s while downloading
-- 20 TB/month VPS ≈ 60 Mbit/s sustained → **covers ~1 heavy user**
-- Unmetered Hetzner dedicated (1 Gbit/s typical) → **covers ~5–7 heavy users sustained**
+- 20 TB/month VPS ≈ 60 Mbit/s sustained → covers ~1 heavy user
+- Unmetered Hetzner dedicated → covers ~5–7 heavy users sustained
 
-Any serious deployment needs either unmetered bandwidth OR many small regional
-proxies sharing the load OR article caching (a popular release downloaded once
-from the provider serves N users).
+Article caching by message-id is the biggest single bandwidth multiplier
+on the table (popular release downloaded once → served N times).
