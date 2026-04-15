@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nzbservice — admin</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header>
+    <h1>nzbservice — admin</h1>
+    <span class="muted" id="auth-state"></span>
+  </header>
+
+  <main>
+    <section id="setup" class="hidden">
+      <div class="notice">
+        Enter the <strong>ADMIN_TOKEN</strong> (from <code>.env</code>) to manage users.
+        It's stored in <code>localStorage</code> for this browser only.
+      </div>
+      <form id="auth-form" autocomplete="off">
+        <input type="password" id="admin-token" placeholder="ADMIN_TOKEN">
+        <button type="submit" class="button">Unlock</button>
+      </form>
+    </section>
+
+    <section id="app" class="hidden">
+      <div class="row">
+        <h2>Users</h2>
+        <button class="button" id="refresh-btn">Refresh</button>
+        <button class="button" id="logout-btn">Forget token</button>
+      </div>
+
+      <table class="jobs" id="users-table">
+        <thead>
+          <tr>
+            <th>Username</th>
+            <th>Status</th>
+            <th>Active / Max</th>
+            <th>Total bytes</th>
+            <th>Sessions ever</th>
+            <th>Last seen</th>
+            <th class="actions-col"></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+
+      <h2>Add user</h2>
+      <form id="create-form" autocomplete="off" class="row">
+        <input type="text" id="new-username" placeholder="username" required>
+        <input type="text" id="new-password" placeholder="password" required>
+        <input type="number" id="new-max" placeholder="max conns" min="1" max="100" value="8" required>
+        <button type="submit" class="button">Create</button>
+      </form>
+      <div id="create-result" class="muted"></div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

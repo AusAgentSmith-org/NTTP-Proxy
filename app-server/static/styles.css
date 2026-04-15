@@ -1,0 +1,245 @@
+:root {
+  color-scheme: dark;
+  --bg: #0f1318;
+  --panel: #1a1f27;
+  --panel-2: #242a33;
+  --border: #2d343f;
+  --text: #e7ebef;
+  --muted: #8a94a3;
+  --accent: #4aa3ff;
+  --accent-2: #2d7fd6;
+  --ok: #4ecc77;
+  --warn: #e8a657;
+  --err: #e8594e;
+  --mono: ui-monospace, "JetBrains Mono", "Fira Code", Consolas, monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.4;
+}
+
+header {
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+}
+
+h1 { margin: 0; font-size: 1.25rem; font-weight: 600; }
+h2 { font-size: 1rem; margin-top: 2rem; margin-bottom: .75rem; color: var(--muted); font-weight: 500; text-transform: uppercase; letter-spacing: .05em; }
+
+nav { display: flex; gap: .25rem; }
+
+.tab {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--muted);
+  padding: .4rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: .9rem;
+}
+.tab:hover { color: var(--text); background: var(--panel); }
+.tab.active { color: var(--text); background: var(--panel); border-color: var(--border); }
+
+main { padding: 1.5rem; max-width: 1100px; margin: 0 auto; }
+
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+.hidden { display: none !important; }
+
+.empty {
+  padding: 2rem;
+  text-align: center;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+
+/* ── Jobs table ───────────────────────────────────────────────────────── */
+
+table.jobs {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border-radius: 8px;
+  overflow: hidden;
+}
+table.jobs th, table.jobs td {
+  text-align: left;
+  padding: .6rem .8rem;
+  border-bottom: 1px solid var(--border);
+  font-size: .9rem;
+}
+table.jobs th {
+  background: var(--panel-2);
+  font-weight: 500;
+  color: var(--muted);
+  text-transform: uppercase;
+  font-size: .75rem;
+  letter-spacing: .05em;
+}
+table.jobs tr:last-child td { border-bottom: none; }
+table.jobs td.name { font-family: var(--mono); font-size: .85rem; }
+table.jobs td.num { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+.bar {
+  position: relative;
+  height: 18px;
+  background: var(--panel-2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.bar .fill {
+  position: absolute; top: 0; left: 0; bottom: 0;
+  background: var(--accent);
+  transition: width .4s ease;
+}
+.bar .fill.complete { background: var(--ok); }
+.bar .fill.failed   { background: var(--err); }
+.bar .label {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: .75rem; font-variant-numeric: tabular-nums;
+  color: var(--text); text-shadow: 0 0 2px rgba(0,0,0,.5);
+}
+
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: .75rem;
+  font-weight: 500;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.status-pill.downloading { background: #153657; color: var(--accent); }
+.status-pill.completed   { background: #0f2b1a; color: var(--ok); }
+.status-pill.failed      { background: #3a1514; color: var(--err); }
+
+/* ── Row actions ──────────────────────────────────────────────────────── */
+
+table.jobs th.actions-col { width: 40px; }
+table.jobs td.actions { text-align: right; padding-right: .6rem; }
+
+.icon-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: .9rem;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: all .15s;
+}
+.icon-btn:hover {
+  color: var(--err);
+  border-color: var(--err);
+  background: #3a1514;
+}
+.icon-btn:disabled { opacity: .5; cursor: wait; }
+
+/* ── Dropzone ─────────────────────────────────────────────────────────── */
+
+.dropzone {
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  padding: 3rem 2rem;
+  text-align: center;
+  background: var(--panel);
+  transition: background .15s, border-color .15s;
+}
+.dropzone.over { background: var(--panel-2); border-color: var(--accent); }
+.dropzone p { margin: .5rem 0; }
+.dropzone .muted { color: var(--muted); }
+
+.button {
+  display: inline-block;
+  padding: .5rem 1.2rem;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  border: none;
+  font-size: .9rem;
+}
+.button:hover { background: var(--accent-2); }
+
+#upload-result {
+  margin-top: 1rem;
+}
+#upload-result .entry {
+  padding: .6rem 1rem;
+  border-radius: 6px;
+  margin-bottom: .5rem;
+  font-family: var(--mono);
+  font-size: .85rem;
+}
+#upload-result .entry.ok    { background: #0f2b1a; color: var(--ok); }
+#upload-result .entry.err   { background: #3a1514; color: var(--err); }
+
+/* ── Search (stub) ───────────────────────────────────────────────────── */
+
+#search-form { display: flex; gap: .5rem; margin-bottom: 1rem; }
+#search-form input {
+  flex: 1;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: .5rem .8rem;
+  border-radius: 6px;
+  font-size: .9rem;
+}
+#search-form input:disabled { opacity: .5; }
+#search-form button:disabled { opacity: .5; cursor: not-allowed; }
+
+.notice {
+  padding: 1rem 1.2rem;
+  background: var(--panel);
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  color: var(--muted);
+  font-size: .9rem;
+}
+.notice strong { color: var(--warn); }
+.notice code { font-family: var(--mono); color: var(--text); }
+
+/* ── Admin-specific ───────────────────────────────────────────────────── */
+
+.row { display: flex; gap: .5rem; align-items: center; margin: 1rem 0; flex-wrap: wrap; }
+.row h2 { margin: 0; flex: 1; }
+.row input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: .5rem .8rem;
+  border-radius: 6px;
+  font-size: .9rem;
+}
+.row input[type="number"] { width: 110px; }
+
+.live { color: var(--accent); font-weight: 600; }
+
+#auth-form { display: flex; gap: .5rem; margin: 1rem 0; max-width: 400px; }
+#auth-form input { flex: 1; }
+
+#auth-state {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: .8rem;
+}
