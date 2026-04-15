@@ -1,91 +1,104 @@
 # nzbservice — agent briefing
 
-> **TL;DR:** Four cooperating Rust services run under one `docker compose`:
-> `app-server` (user/lock/activity, :8090), `nntp-proxy` (NNTP broker, :1119),
-> `gui` (web UI + nzb.indexarr search, :8080), `client` (CLI test harness).
-> The proxy validates every NNTP login against the app-server, enforces a
-> per-user connection cap, reports activity every 5s, and drops sessions
-> within ~2s when a user is locked. Read `docs/architecture.md` for the
-> shape and `docs/todo.md` for what's known-bad / next.
+> **TL;DR:** Four Rust services under one `docker compose`: `app-server`
+> (users/locks/activity/sessions/FP, SQLite-persisted, :8090), `nntp-proxy`
+> (broker, plain :1119 + NNTPS :5563), `gui` (web UI with login, :8080),
+> `client` (CLI test harness). Users log into the gui with a password and
+> get an opaque **session key** — that's the credential the proxy sees on
+> AUTHINFO, never the real password. Locking a user revokes their keys
+> *and* drops any active NNTP sessions within ~2s. The proxy's self-signed
+> NNTPS cert is persisted across restarts and its SHA-256 fingerprint is
+> exposed at `GET /api/fingerprint` for future bundled clients to pin.
+> Read `docs/architecture.md` for the shape, `docs/todo.md` for what's
+> next.
 
 ## Where things live
 
 ```
 nzbservice/
 ├── README.md  CLAUDE.md  docs/{architecture,todo}.md
-├── src/                 nntp-proxy
-│   ├── main.rs          listener; spawns activity reporter + lock poller
-│   ├── config.rs        env config (NNTP_*, APP_SERVER_URL, PROXY_TOKEN, …)
-│   ├── pool.rs          UpstreamPool — TLS connection pool to provider
-│   ├── user_pool.rs     per-user semaphore + session registry (cancel chans)
-│   ├── app_client.rs    HTTP client for app-server (validate / activity / locked)
-│   └── session.rs       per-client NNTP state machine (auth + pass-through)
-├── Cargo.toml           proxy deps: tokio, tokio-rustls, reqwest, parking_lot
-├── Dockerfile           rust:1.90 builder → debian:trixie runtime
-├── app-server/          user + lock + activity service
-│   ├── src/{main,handlers,state,store}.rs
-│   ├── static/          admin HTML/JS/CSS
-│   └── Dockerfile       builds in Docker (public crates only)
-├── gui/                 web client
-│   ├── src/main.rs      Axum routes: queue, upload, search, grab, cancel
-│   ├── static/          HTML/JS/CSS, polls /api/queue every 2s
-│   └── Dockerfile       packages PRE-BUILT host binary + static assets
-├── client/              CLI test harness
-│   ├── src/main.rs      NZBFailTest port, env-var driven
-│   └── Dockerfile       packages PRE-BUILT host binary
-├── docker-compose.yml   all four services
-├── .env                 INDEXARR_API_KEY, ADMIN_TOKEN, PROXY_TOKEN, BOOTSTRAP_*
-├── nzbs/                drop .nzb files here for the CLI client (gitignored)
-├── downloads/           gui + client write here (gitignored)
-└── logs/                per-service rolling daily logs (gitignored)
+├── src/                    nntp-proxy
+│   ├── main.rs             plain + NNTPS listeners, background tasks
+│   ├── config.rs           env config
+│   ├── pool.rs             UpstreamPool — TLS to provider + idle reuse (60s TTL)
+│   ├── user_pool.rs        per-user semaphore + cancellable session registry
+│   ├── app_client.rs       HTTP client for app-server
+│   ├── session.rs          generic NNTP session state machine
+│   └── tls.rs              self-signed cert generation / loading
+├── Cargo.toml  Dockerfile  proxy builds in Docker
+├── app-server/             user + lock + activity + sessions + FP
+│   ├── src/{main,handlers,store,state}.rs
+│   ├── static/             admin HTML/JS/CSS
+│   ├── Cargo.toml  Dockerfile  builds in Docker
+├── gui/                    web client
+│   ├── src/{main,app_client}.rs
+│   ├── static/             index.html + app.js + styles.css
+│   ├── Cargo.toml  Dockerfile  pre-built host binary + static assets
+├── client/                 CLI test harness (NZBFailTest port)
+├── docker-compose.yml      all four services
+├── .env                    INDEXARR_API_KEY, ADMIN_TOKEN, PROXY_TOKEN, BOOTSTRAP_*
+├── data/                   SQLite DB + TLS cert — gitignored, volume-mounted
+├── nzbs/  downloads/  logs/  gitignored volumes
 ```
 
-## Service roles in one paragraph each
+## Service roles, in one paragraph each
 
-**`app-server`** — single source of truth for users (`username`,
-salted-SHA256 password, `max_connections`, `locked`) and proxy-reported
-runtime state (`active_sessions`, `bytes_total`, `last_seen`). In-memory
-store; restart loses state. Two HTTP surfaces, both bearer-token:
-`/api/admin/*` (ADMIN_TOKEN, used by admin HTML UI) and `/api/proxy/*`
-(PROXY_TOKEN, used by nntp-proxy: validate, activity, locked).
-Bootstrap user is created from `BOOTSTRAP_USER`/`BOOTSTRAP_PASS` env on
-first start.
+**`app-server`** — single source of truth. SQLite users table (username,
+password hash, max_connections, locked, created_at, and lifetime
+counters that accumulate across restarts: bytes_total, total_sessions,
+last_seen). SQLite sessions table (session_key PK, username, TTL).
+Runtime-only per-user: `active_sessions` and `bytes_per_sec`, both
+updated from proxy activity reports, both reset on restart. Three HTTP
+surfaces — admin (ADMIN_TOKEN), proxy (PROXY_TOKEN), public
+(auth/login, auth/logout, fingerprint, health). Two background tasks:
+stale-rate decay every 5s, expired-session purge every 5min. Bootstrap
+user created on first start if DB is fresh and `BOOTSTRAP_USER/PASS`
+set.
 
-**`nntp-proxy`** — accepts plaintext NNTP on :119, opens a TLS connection
-to one upstream Usenet server using a single set of credentials (env). On
-client `AUTHINFO PASS`: calls `app-server /api/proxy/validate`; if
-allowed, acquires a per-user semaphore permit (cap = `max_connections`
-from app-server) and an upstream provider permit. Two background tokio
-tasks: activity reporter (every 5s, drains UserPool counters → POST) and
-lock poller (every 2s, GET `/locked`, trip cancel on each active session
-of locked users).
+**`nntp-proxy`** — dual listeners, one session handler. Plain :119 and
+NNTPS :563 both feed `session::handle<S: AsyncRead+AsyncWrite+...>`.
+Self-signed cert generated by rcgen on first start, persisted to
+`/data/tls/`, fingerprint written to `/data/tls/fingerprint`. AUTHINFO
+PASS → `app-server /api/proxy/validate` (which tries session-key first,
+then password). Two semaphores gate each session: pool-wide (provider
+cap, default 15) + per-user (cap from app-server). Upstream conns go
+to an idle pool on clean QUIT and are reused on next acquire — permits
+travel with idle entries so provider cap is honoured across active +
+idle combined. TTL sweeper drops idle > 60s every 10s. Two background
+tasks: activity reporter (5s), lock poller (2s → fires per-session
+cancel channels for any locked user).
 
-**`gui`** — Axum + plain HTML/JS. Reuses `nzb-web::QueueManager` for
-downloading (same engine as the CLI client). Three tabs: Queue (polls,
-cancel button), Upload (drag/drop multipart), Search (proxies to
-nzb.indexarr `/api/releases`, "↓" button does `/api/releases/:id/nzb` →
-parse → enqueue).
+**`gui`** — Axum + plain HTML/JS. Login exchanges password for a
+session key at the app-server; key goes into `ServerConfig` as the
+NNTP PASS via `QueueManager::update_servers` (real password is never
+persisted or forwarded). Session is single-global-server-side
+`RwLock<Option<Session>>` — two browsers sharing the same gui share the
+login. Middleware gates all `/api/*` except login/logout/me. Auto-login
+at startup if `BOOTSTRAP_USER/PASS` env set. Tabs: Queue (polls,
+cancel ✕), Upload (drag/drop multipart), Search (proxies to
+`nzb.indexarr`, ↓ button does grab → parse → enqueue).
 
-**`client`** — Headless port of `NZBFailTest`. Reads `.nzb` files from
-`/nzbs`, env-var driven, useful for repeatable load tests. Scale with
-`--scale client=N`.
+**`client`** — headless NZBFailTest port for repeatable load tests.
+Authenticates with password directly (the app-server's validate still
+accepts that path) — does not use session keys.
 
 ## Critical context
 
 ### 1. Where the proxy's upstream code comes from
 
-**Not `nzb-nntp`.** `NntpConnection` only exposes high-level methods
-(`fetch_body`, `xover`, …) that return parsed structs; a proxy needs raw
-byte forwarding. `src/pool.rs` opens its own `tokio-rustls` TLS
-connections. Don't try to "simplify" by routing through `nzb-nntp`.
+**Not `nzb-nntp`.** `NntpConnection` exposes only high-level methods
+(`fetch_body`, `xover`, ...) returning parsed structs. A proxy needs
+raw byte forwarding. `src/pool.rs` opens its own `tokio-rustls` TLS
+connections to the provider. Don't try to "simplify" by routing
+through `nzb-nntp` — `src/session.rs` handles the bytes end-to-end.
 
 ### 2. Why `gui` and `client` can't build in Docker
 
 They depend on `nzb-web`, `nzb-core`, `nzb-nntp`, `nzb-postproc`,
-`nzb-decode`, `yenc-simd` — all on the private Forgejo cargo registry at
-`repo.indexarr.net` (Tailscale, unreachable from Docker). Cargo
-unconditionally tries to update the registry index before applying
-`[patch]` sections, and fails on auth.
+`nzb-decode`, `yenc-simd` — all on the private Forgejo cargo registry
+at `repo.indexarr.net` (Tailscale, unreachable from inside Docker).
+Cargo unconditionally tries to update the registry index before
+applying `[patch]` sections, and fails on auth.
 
 **Both Dockerfiles package a PRE-BUILT host binary.** Workflow:
 
@@ -95,73 +108,99 @@ unconditionally tries to update the registry index before applying
 docker compose build {gui,client}
 ```
 
-`app-server` and `nntp-proxy` use only public crates — they build inside
-Docker as normal.
+`app-server` and `nntp-proxy` use only public crates — they build
+inside Docker normally.
 
 ### 3. glibc alignment
 
 Host binaries link against host glibc (≥2.38 on modern Ubuntu/Debian).
-`debian:bookworm-slim` ships glibc 2.36 — incompatible. **All Dockerfiles
+`debian:bookworm-slim` is glibc 2.36 — incompatible. **All Dockerfiles
 use `debian:trixie-slim`** (glibc 2.41). Don't downgrade.
 
 ### 4. Logs go to files, not stdout
 
-Every service uses `tracing-appender` to write daily-rolled logs to
-`/logs/<name>.log.<date>`. The `./logs/` volume mount surfaces them on
-the host. `docker logs <service>` only carries the one-line startup
-message — tail the file for detail:
+`tracing-appender` writes daily-rolled logs to `/logs/<name>.log.<date>`.
+`./logs/` volume mount surfaces them on the host. `docker logs
+<service>` only shows a one-line startup message. Tail files for detail:
 
 ```bash
 tail -f logs/app-server.log.*
 tail -f logs/nntp-proxy.log.*
 tail -f logs/gui.log.*
-tail -f logs/nzbservice-client-*.log.*
 ```
 
-Don't restore stdout logging without explicit user request.
+Don't restore stdout logging without explicit request.
 
-### 5. Local lib versions diverge from registry versions
+### 5. Cargo.lock "patch not used" warnings
 
-The `gui`/`client` `Cargo.lock` pins registry versions (e.g. `nzb-web
-0.1.10`); the local libs at `~/Working/libs/*` are ahead (e.g. `0.2.x`).
-Cargo prints `patch was not used` warnings on every host build. **This
-is expected.** `cargo update` to force local versions is a deliberate
+The gui/client `Cargo.lock` pins registry versions of private libs; the
+local libs at `~/Working/libs/*` are ahead (e.g. `nzb-web 0.2.0` local
+vs `0.1.10` registry). Cargo prints a warning on every host build.
+**Expected.** `cargo update` to force local versions is a deliberate
 choice — don't do it reactively.
 
-### 6. App-server state is in-memory
+### 6. App-server state is persistent (SQLite), but only some fields
 
-Every restart creates a fresh app-server: bootstrap user re-created,
-all created users gone, all activity counters reset. Persistence is in
-`docs/todo.md` — don't bolt on without a chat first.
+Persisted: users, password hashes, caps, lock flags, `bytes_total`,
+`total_sessions`, `last_seen`, session keys.
 
-### 7. Per-user vs pool-wide connection caps
+Runtime-only (reset on restart): `active_sessions`, `bytes_per_sec`.
+These reflect the **current process's** view — a count from a dead
+process would be misleading, so we start at zero.
+
+### 7. Session keys vs passwords
+
+Users log in with a password; the gui hands that to `POST /api/auth/login`
+which mints a 48-char opaque session key (stored in `sessions` table,
+30-day default TTL). Gui uses `username + session_key` as the NNTP
+AUTHINFO credentials. Proxy validates against app-server, which tries
+session lookup first then falls back to raw password check. The
+backward-compat fallback means the CLI client still works with
+passwords directly.
+
+On `set_locked(true)`, the admin handler also calls
+`revoke_sessions_for_user` so every issued key is immediately invalid
+— the proxy's 2s lock-poll then trips any already-open sessions.
+
+### 8. Per-user vs pool-wide connection caps
 
 Two semaphores stack:
 
-- **Pool-wide** (`pool.rs`) — sized to provider account limit (`NNTP_CONNECTIONS`,
-  default 15). Caps total concurrent upstream sockets.
-- **Per-user** (`user_pool.rs`) — sized to that user's `max_connections`
-  from the app-server. Caps how many sessions one user can run.
+- **Pool-wide** (`pool.rs`) sized to provider cap (`NNTP_CONNECTIONS`,
+  default 15). Caps total concurrent upstream sockets, counting **both
+  active and idle** (because the provider sees them).
+- **Per-user** (`user_pool.rs`) sized to that user's `max_connections`
+  from the app-server. Caps one user's sessions.
 
-A new session acquires the per-user permit first, then the pool-wide
-permit. Both must be available.
+A new session acquires the per-user permit first, then the pool-wide.
 
-### 8. Lock enforcement is poll-based, not push
+### 9. NNTPS + cert pinning
 
-Lock takes effect within `LOCK_POLL_INTERVAL_SECS` (default 2s). The
-proxy polls `/api/proxy/locked`, finds matches in its session registry,
-fires the per-session `oneshot::Sender<()>` cancel signal, the session
-selects on it and exits with `482 Account locked`. Switching to SSE for
-sub-100ms locks is in `todo.md`.
+Proxy listens on both :119 (plain) and :563 (NNTPS). TLS is enabled
+iff `TLS_PORT != 0`. Cert is self-signed (rcgen), persisted across
+restarts at `/data/tls/cert.pem` + `key.pem`. SHA-256 fingerprint is
+written to `/data/tls/fingerprint` and served by the app-server at
+`GET /api/fingerprint`.
 
-## NNTP protocol facts the proxy depends on
+**`nzb-nntp 0.2.13` added `ServerConfig.trusted_fingerprint: Option<String>`.**
+Any consumer can pin the proxy's cert by setting that field — WebPKI
+is bypassed, hostname ignored, SHA-256 match only. This is the
+mechanism a future bundled client will use.
 
-The proxy forwards arbitrary commands byte-for-byte. Multi-line response
-detection is by status code:
+### 10. Lock enforcement is poll-based, not push
 
-- **Multi-line** (body follows, terminated by `.\r\n`):
-  `215`, `220`, `221`, `222`, `224`, `225`, `230`, `231`, `282`
-- **Single-line:** everything else
+Locks take effect within `LOCK_POLL_INTERVAL_SECS` (default 2s).
+`revoke_sessions_for_user` fires the oneshot Sender for every live
+session of the locked user. Session `tokio::select!`s between its
+next read and the cancel receiver — cancel path returns `482 Account
+locked`. SSE instead of polling is in the todo if sub-100ms latency
+matters.
+
+## NNTP protocol facts
+
+Multi-line response codes that need body-forwarding-until-`.\r\n`:
+
+> `215` `220` `221` `222` `224` `225` `230` `231` `282`
 
 Set lives in `src/session.rs::is_multiline()`. Add new codes there if a
 new NNTP extension's response is multi-line.
@@ -170,15 +209,16 @@ new NNTP extension's response is multi-line.
 
 | | Version |
 |---|---|
-| Rust | 2024 edition; rustc ≥1.88 (time crate) |
+| Rust | edition 2024; rustc ≥1.88 (time crate) |
 | Docker builder | `rust:1.90-slim` (trixie-based) |
 | Docker runtime | `debian:trixie-slim` (glibc 2.41) |
 | HTTP server | `axum 0.8` |
-| HTTP client | `reqwest 0.12` (rustls only, no openssl) |
-| TLS | `tokio-rustls 0.26` + `webpki-roots 1` |
+| HTTP client | `reqwest 0.12` (rustls only) |
+| TLS | `tokio-rustls 0.26` + `webpki-roots 1` + `rcgen 0.13` |
 | Async | `tokio 1` full features |
-| Locks | `parking_lot::{Mutex, RwLock}` (sync code paths only) |
-| Logging | `tracing` + `tracing-appender` daily rolling |
+| Locks | `parking_lot::{Mutex, RwLock}` |
+| Storage | `rusqlite 0.32` (bundled, no system deps) |
+| Logging | `tracing` + `tracing-appender` daily |
 
 ## Commands
 
@@ -191,11 +231,15 @@ cd ~/Working/apps/nzbservice
 docker compose build
 docker compose up -d
 
-# UIs
-xdg-open http://localhost:8080  # gui
-xdg-open http://localhost:8090  # admin (token: ADMIN_TOKEN from .env)
+# Tests
+cargo test --bin nntp-proxy            # 4 UserPool tests
+(cd app-server && cargo test)          # 9 Store + integration tests
 
-# Watch what's happening
+# UIs
+xdg-open http://localhost:8080         # gui (bootstrap: guiuser/guipass)
+xdg-open http://localhost:8090         # admin (token: ADMIN_TOKEN)
+
+# Logs
 tail -f logs/*
 
 # Fast iterations
@@ -212,48 +256,55 @@ docker compose down
 ```bash
 # Health
 curl http://localhost:8090/health
-curl -o /dev/null -w "%{http_code}\n" http://localhost:8080/
+curl http://localhost:8090/api/fingerprint
 
 # Admin lists users
 curl -H "Authorization: Bearer admin-dev-token" http://localhost:8090/api/admin/users
 
-# NNTP auth (bad password should 481)
-{ printf 'AUTHINFO USER guiuser\r\nAUTHINFO PASS WRONG\r\nQUIT\r\n'; sleep 1; } | nc -w 3 localhost 1119
+# NNTPS handshake (fingerprint check)
+echo | openssl s_client -connect localhost:5563 2>/dev/null |
+  openssl x509 -noout -fingerprint -sha256
 
-# Lock a user, then try to authenticate as them — should 481
+# NNTP auth via plain
+{ printf 'AUTHINFO USER guiuser\r\nAUTHINFO PASS guipass\r\nQUIT\r\n'; sleep 1; } |
+  nc -w 3 localhost 1119
+
+# Lock a user → their keys are revoked + active sessions dropped
 curl -H "Authorization: Bearer admin-dev-token" -H "Content-Type: application/json" \
   -X PUT -d '{"locked":true}' http://localhost:8090/api/admin/users/guiuser/lock
 ```
 
 ## What NOT to do
 
-- **No `Co-Authored-By: Claude` etc. on commits** — `~/Working/CLAUDE.md` forbids it.
-- **Don't try to make `gui`/`client` build in Docker.** Forgejo is unreachable; pre-build on host.
-- **Don't downgrade Docker base images.** trixie required for glibc.
-- **Don't commit `target/`, `nzbs/`, `downloads/`, `logs/`, `.env`** — gitignored.
+- **No `Co-Authored-By: Claude`** in commits — `~/Working/CLAUDE.md` forbids it.
+- **Don't try to build `gui`/`client` in Docker.** Forgejo is unreachable.
+- **Don't downgrade Docker base images** below trixie (glibc requirement).
+- **Don't commit `target/`, `nzbs/`, `downloads/`, `logs/`, `data/`, `.env`** — gitignored.
 - **Don't restore stdout logging** without explicit user request.
-- **Don't `cargo update` to clear "patch not used" warnings** without a reason.
-- **Don't add persistence/web-auth to app-server casually** — chat first; user explicitly scoped this iteration as POC with in-memory state.
-- **Don't invent users.** Ask before creating fake-data flows.
+- **Don't `cargo update` to clear "patch not used" warnings** — they're expected.
+- **Don't invent auth schemes casually.** Session keys + raw-password fallback
+  is the current contract. Tighten `auth_method="password"` rejection only
+  on explicit request (it's a deliberate compat path for the CLI client).
+- **Don't invent users or seed production-ish data** without asking.
 
 ## Where to look first when something breaks
 
 | Symptom | Start here |
 |---|---|
-| GUI loads but downloads never start | Check `logs/nntp-proxy.log.*` — usually upstream auth or pool exhausted |
-| All AUTH fails with 481 | Is app-server up? `docker compose ps app-server`; check `PROXY_TOKEN` matches in both services |
-| User can authenticate but only N sessions work | Their `max_connections` cap. Bump in admin UI |
-| Lock doesn't take effect | Lock poller running? Should see "dropped sessions for locked users" in proxy log within 2s |
+| GUI loads but downloads never start | `logs/nntp-proxy.log.*` — upstream auth or pool exhausted |
+| All AUTH fails with 481 | `docker compose ps app-server`; `PROXY_TOKEN` mismatch between services |
+| User authenticates but only N sessions work | Their `max_connections` cap — bump in admin UI |
+| Lock doesn't take effect | Lock poller running? Grep for "dropped sessions" in proxy log (should appear within 2s) |
 | BODY data truncated | `is_multiline()` missing the response code? |
 | Client immediately exits in Docker | glibc mismatch — runtime image must be trixie |
-| `registry index was not found` building proxy | Something added a Forgejo registry dep to the proxy's Cargo.toml |
-| `authenticated registries require a credential-provider` | gui/client trying to build inside Docker — must be pre-built on host |
-| Pool acquire hangs forever | Upstream is dead OR every per-user slot is held — grep `acquire upstream slot` |
+| `registry index was not found` building proxy | Something added a Forgejo registry dep to proxy's `Cargo.toml` |
+| `authenticated registries require a credential-provider` | gui/client trying to build in Docker — must be pre-built on host |
+| NNTPS handshake fails | Cert generated? `ls data/tls/`. Logs show "NNTPS fingerprint: ..." on startup. |
 | Admin UI says "unauthorised" | Wrong `ADMIN_TOKEN`. Click "Forget token" and re-paste |
 
 ## Tone notes
 
 User prefers concise output. No walls of text, no restating what they
-just said, no bullet lists they didn't ask for. Architectural
+just said, no bullet lists they didn't ask about. Architectural
 conversations happen in prose. Confirm decisions, don't recommend ten
 options. When something works, say so briefly and move on.
