@@ -62,9 +62,16 @@ services:
       MAX_ACTIVE_DOWNLOADS: "2"
       INDEXARR_URL: ${INDEXARR_URL:-https://nzb.indexarr.net}
       INDEXARR_API_KEY: ${INDEXARR_API_KEY:-}
+      APP_SERVER_URL: http://app-server:8090
+      PROXY_TOKEN: ${PROXY_TOKEN:-proxy-dev-token}
+      # Optional: auto-login on startup so the gui is usable without typing creds.
+      # Comment these out to force a manual login on every gui restart.
+      BOOTSTRAP_USER: ${BOOTSTRAP_USER:-guiuser}
+      BOOTSTRAP_PASS: ${BOOTSTRAP_PASS:-guipass}
       RUST_LOG: ${RUST_LOG:-info,nzb_web=debug,nzb_nntp=info}
     depends_on:
       - nntp-proxy
+      - app-server
     restart: unless-stopped
 
   # ── CLI test client ──────────────────────────────────────────────────────────

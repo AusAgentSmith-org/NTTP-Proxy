@@ -1519,6 +1519,7 @@ dependencies = [
  "nzb-nntp",
  "nzb-postproc",
  "nzb-web",
+ "parking_lot",
  "reqwest",
  "serde",
  "serde_json",

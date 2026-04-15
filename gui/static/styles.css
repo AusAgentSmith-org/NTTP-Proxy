@@ -153,6 +153,46 @@ table.jobs td.actions { text-align: right; padding-right: .6rem; }
 }
 .icon-btn:disabled { opacity: .5; cursor: wait; }
 
+/* ── Login screen ─────────────────────────────────────────────────────── */
+
+.login-screen {
+  max-width: 360px;
+  margin: 4rem auto;
+  padding: 2rem;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+.login-screen h2 { margin: 0 0 1rem; color: var(--text); text-transform: none; letter-spacing: 0; font-size: 1.1rem; }
+.login-screen form { display: flex; flex-direction: column; gap: .75rem; }
+.login-screen input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: .65rem .85rem;
+  border-radius: 6px;
+  font-size: .95rem;
+}
+.login-screen input:focus { outline: none; border-color: var(--accent); }
+.login-screen .error {
+  color: var(--err);
+  font-size: .85rem;
+  min-height: 1.2em;
+}
+
+/* ── User bar (header) ────────────────────────────────────────────────── */
+
+.user-bar {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+}
+.user-bar #user-name {
+  font-family: var(--mono);
+  font-size: .85rem;
+}
+
 /* ── Dropzone ─────────────────────────────────────────────────────────── */
 
 .dropzone {

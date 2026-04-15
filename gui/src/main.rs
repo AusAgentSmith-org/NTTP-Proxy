@@ -1,23 +1,35 @@
-//! nzbservice GUI — minimal Axum backend.
+//! nzbservice GUI — Axum backend.
 //!
-//! Exposes:
-//!   GET  /                 → static index.html
-//!   GET  /static/*         → other static assets (JS, CSS)
-//!   POST /api/upload       → multipart .nzb upload; parses + enqueues
-//!   GET  /api/queue        → JSON of active jobs + recent history
-//!   GET  /api/search?q=..  → STUBBED — returns empty results with a note
+//! Auth model: single-user-at-a-time. Session lives server-side in a
+//! `RwLock<Option<Session>>`. Login validates against the app-server,
+//! stores the session, and hot-swaps the QueueManager's NNTP credentials
+//! via `update_servers`. Logout clears the session and the server list,
+//! which kills any in-flight upstream connections.
 //!
-//! Downloads route through the NNTP proxy — same env-var config as the test
-//! client (NNTP_HOST, NNTP_PORT, NNTP_USER, NNTP_PASS, NNTP_CONNECTIONS, NNTP_SSL).
+//! API surface:
+//!   POST /api/login             {username, password} → {username, max_connections}
+//!   POST /api/logout            -
+//!   GET  /api/me                → 200 with user, or 401 if not logged in
+//!   --- protected (require login) ---
+//!   GET  /api/queue
+//!   POST /api/upload            multipart .nzb files
+//!   DELETE /api/jobs/{id}
+//!   GET  /api/search?q=…
+//!   POST /api/grab/{id}
+
+mod app_client;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use axum::extract::{Multipart, Path as AxumPath, Query, State};
+use axum::extract::{Multipart, Path as AxumPath, Query, Request, State};
 use axum::http::StatusCode;
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
@@ -27,14 +39,34 @@ use nzb_core::models::JobStatus;
 use nzb_web::QueueManager;
 use nzb_web::log_buffer::LogBuffer;
 
+use crate::app_client::AppClient;
+
 // ────────────────────────────────────────────────────────────────────────────
-// State
+// State + Session
 // ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize)]
+struct Session {
+    username: String,
+    max_connections: u32,
+}
 
 #[derive(Clone)]
 struct AppState {
     queue: Arc<QueueManager>,
     indexarr: IndexarrClient,
+    app_client: AppClient,
+    /// `None` → not logged in. POC: single global session for all clients.
+    session: Arc<RwLock<Option<Session>>>,
+    /// NNTP transport defaults (host/port/ssl) — username/password come from session.
+    nntp_defaults: NntpDefaults,
+}
+
+#[derive(Clone, Debug)]
+struct NntpDefaults {
+    host: String,
+    port: u16,
+    ssl: bool,
 }
 
 #[derive(Clone)]
@@ -63,7 +95,7 @@ impl IndexarrClient {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Config
+// Config helpers
 // ────────────────────────────────────────────────────────────────────────────
 
 fn env_or(key: &str, default: &str) -> String {
@@ -77,32 +109,113 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
-fn build_server_from_env() -> ServerConfig {
-    let host = env_or("NNTP_HOST", "nntp-proxy");
-    let port: u16 = env_parse("NNTP_PORT", 119);
-    let ssl = std::env::var("NNTP_SSL")
-        .map(|v| !matches!(v.to_lowercase().as_str(), "false" | "0" | "no"))
-        .unwrap_or(false);
-    let connections: u16 = env_parse("NNTP_CONNECTIONS", 8);
-    let username = std::env::var("NNTP_USER").ok();
-    let password = std::env::var("NNTP_PASS").ok();
+fn nntp_defaults_from_env() -> NntpDefaults {
+    NntpDefaults {
+        host: env_or("NNTP_HOST", "nntp-proxy"),
+        port: env_parse("NNTP_PORT", 119),
+        ssl: std::env::var("NNTP_SSL")
+            .map(|v| !matches!(v.to_lowercase().as_str(), "false" | "0" | "no"))
+            .unwrap_or(false),
+    }
+}
 
-    // ServerConfig is #[non_exhaustive] — construct via new() then mutate.
-    let mut cfg = ServerConfig::new("proxy", &host);
-    cfg.name = format!("{host}:{port}");
-    cfg.port = port;
-    cfg.ssl = ssl;
-    cfg.ssl_verify = ssl;
-    cfg.username = username;
-    cfg.password = password;
-    cfg.connections = connections;
+/// Build a single ServerConfig pointing at the proxy with this user's creds.
+/// `cap` is the per-user connection cap from the app-server.
+fn build_user_server(defaults: &NntpDefaults, username: &str, password: &str, cap: u32) -> ServerConfig {
+    let mut cfg = ServerConfig::new("proxy", &defaults.host);
+    cfg.name = format!("{}:{}", defaults.host, defaults.port);
+    cfg.port = defaults.port;
+    cfg.ssl = defaults.ssl;
+    cfg.ssl_verify = defaults.ssl;
+    cfg.username = Some(username.to_string());
+    cfg.password = Some(password.to_string());
+    cfg.connections = cap.try_into().unwrap_or(u16::MAX);
     cfg.pipelining = 10;
     cfg.ramp_up_delay_ms = 100;
     cfg
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Routes
+// Auth middleware — gates everything except /api/login, /api/logout, /api/me
+// ────────────────────────────────────────────────────────────────────────────
+
+async fn require_login(
+    State(st): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, String)> {
+    if st.session.read().is_some() {
+        Ok(next.run(req).await)
+    } else {
+        Err((StatusCode::UNAUTHORIZED, "login required".into()))
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Login / Logout / Me
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct LoginBody {
+    username: String,
+    password: String,
+}
+
+async fn h_login(
+    State(st): State<AppState>,
+    Json(body): Json<LoginBody>,
+) -> Result<Json<Session>, (StatusCode, String)> {
+    if !st.app_client.is_configured() {
+        return Err((StatusCode::SERVICE_UNAVAILABLE, "app-server not configured".into()));
+    }
+    let resp = st
+        .app_client
+        .validate(&body.username, &body.password)
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("validate: {e}")))?;
+
+    if !resp.allowed {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            resp.reason.unwrap_or_else(|| "invalid credentials".into()),
+        ));
+    }
+
+    let session = Session {
+        username: body.username.clone(),
+        max_connections: resp.max_connections,
+    };
+
+    // Hot-swap the QueueManager's server list with this user's creds.
+    let server = build_user_server(
+        &st.nntp_defaults,
+        &body.username,
+        &body.password,
+        resp.max_connections,
+    );
+    st.queue.update_servers(vec![server]);
+
+    *st.session.write() = Some(session.clone());
+    info!(user = %body.username, max = resp.max_connections, "login");
+    Ok(Json(session))
+}
+
+async fn h_logout(State(st): State<AppState>) -> Json<serde_json::Value> {
+    let was = st.session.write().take();
+    if let Some(s) = was {
+        info!(user = %s.username, "logout");
+    }
+    // Empty servers → in-flight upstream connections die on next reconnect.
+    st.queue.update_servers(vec![]);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+async fn h_me(State(st): State<AppState>) -> Result<Json<Session>, StatusCode> {
+    st.session.read().clone().map(Json).ok_or(StatusCode::UNAUTHORIZED)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Queue / Upload / Cancel / Search / Grab
 // ────────────────────────────────────────────────────────────────────────────
 
 #[derive(Serialize)]
@@ -214,9 +327,7 @@ async fn h_upload(
                 job.output_dir = base.join("complete").join(stem);
 
                 match st.queue.add_job(job, Some(data.to_vec())) {
-                    Ok(()) => {
-                        added += 1;
-                    }
+                    Ok(()) => added += 1,
                     Err(e) => {
                         warn!("add_job failed: {e}");
                         errors.push(format!("{filename}: {e}"));
@@ -230,17 +341,7 @@ async fn h_upload(
         }
     }
 
-    Ok(Json(serde_json::json!({
-        "added": added,
-        "errors": errors,
-    })))
-}
-
-#[derive(Deserialize)]
-struct SearchQuery {
-    q: Option<String>,
-    limit: Option<u32>,
-    offset: Option<u32>,
+    Ok(Json(serde_json::json!({ "added": added, "errors": errors })))
 }
 
 async fn h_cancel(
@@ -252,6 +353,13 @@ async fn h_cancel(
         .remove_job(&id)
         .map_err(|e| (StatusCode::NOT_FOUND, format!("remove_job: {e}")))?;
     Ok(Json(serde_json::json!({ "removed": id })))
+}
+
+#[derive(Deserialize)]
+struct SearchQuery {
+    q: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 async fn h_search(
@@ -292,25 +400,18 @@ async fn h_search(
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("decode: {e}")))?;
 
     if !status.is_success() {
-        return Err((
-            StatusCode::BAD_GATEWAY,
-            format!("indexarr {status}: {body}"),
-        ));
+        return Err((StatusCode::BAD_GATEWAY, format!("indexarr {status}: {body}")));
     }
 
     Ok(Json(body))
 }
 
-/// Grab: fetch NZB from indexarr by release id, parse it, enqueue it.
 async fn h_grab(
     State(st): State<AppState>,
     AxumPath(id): AxumPath<u64>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let Some(api_key) = st.indexarr.api_key.as_ref() else {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "INDEXARR_API_KEY not configured".into(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "INDEXARR_API_KEY not configured".into()));
     };
 
     let url = format!("{}/api/releases/{}/nzb", st.indexarr.base_url, id);
@@ -368,7 +469,6 @@ async fn h_grab(
     })))
 }
 
-/// Pull `filename="..."` (or unquoted) out of a Content-Disposition header.
 fn extract_filename(cd: &str) -> Option<String> {
     let idx = cd.to_lowercase().find("filename=")?;
     let tail = &cd[idx + "filename=".len()..];
@@ -388,7 +488,6 @@ fn extract_filename(cd: &str) -> Option<String> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Logs to /logs/gui.log.<date>; stdout only carries the startup line.
     let log_dir = env_or("LOG_DIR", "/logs");
     std::fs::create_dir_all(&log_dir).ok();
     let appender = tracing_appender::rolling::daily(&log_dir, "gui.log");
@@ -407,8 +506,7 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(false)
         .init();
 
-    // Build queue manager wired to the NNTP proxy
-    let server = build_server_from_env();
+    // Build queue manager with NO servers — login installs them via update_servers.
     let base = PathBuf::from(env_or("BASE_DIR", "/downloads"));
     let incomplete = base.join("incomplete");
     let complete = base.join("complete");
@@ -420,46 +518,94 @@ async fn main() -> anyhow::Result<()> {
     let log_buffer = LogBuffer::new();
 
     let queue = QueueManager::new(
-        vec![server],
+        vec![],
         db,
         incomplete,
         complete,
         log_buffer,
         env_parse("MAX_ACTIVE_DOWNLOADS", 2),
         vec![],
-        0,     // min_free_space
-        0,     // speed_limit
-        false, // direct_unpack
-        true,  // abort_hopeless
-        true,  // early_failure_check
-        100.2, // required_completion_pct
-        30,    // article_timeout_secs
+        0,
+        0,
+        false,
+        true,
+        true,
+        100.2,
+        30,
     );
 
     let indexarr = IndexarrClient::from_env();
     if !indexarr.is_configured() {
         warn!("INDEXARR_API_KEY not set — search will return 'not configured'");
-    } else {
-        info!(base = %indexarr.base_url, "indexarr search enabled");
     }
-    let state = AppState { queue, indexarr };
+
+    let app_client = AppClient::new(
+        env_or("APP_SERVER_URL", ""),
+        env_or("PROXY_TOKEN", "proxy-dev-token"),
+    );
+    if !app_client.is_configured() {
+        warn!("APP_SERVER_URL not set — login will fail until configured");
+    }
+
+    let nntp_defaults = nntp_defaults_from_env();
+
+    let state = AppState {
+        queue: queue.clone(),
+        indexarr,
+        app_client: app_client.clone(),
+        session: Arc::new(RwLock::new(None)),
+        nntp_defaults: nntp_defaults.clone(),
+    };
+
+    // Optional auto-login: if BOOTSTRAP_USER/PASS are set (compose default),
+    // log in on startup so things work out of the box.
+    if let (Ok(u), Ok(p)) = (std::env::var("BOOTSTRAP_USER"), std::env::var("BOOTSTRAP_PASS"))
+        && !u.is_empty()
+        && app_client.is_configured()
+    {
+        match app_client.validate(&u, &p).await {
+            Ok(r) if r.allowed => {
+                let server = build_user_server(&nntp_defaults, &u, &p, r.max_connections);
+                queue.update_servers(vec![server]);
+                *state.session.write() = Some(Session {
+                    username: u.clone(),
+                    max_connections: r.max_connections,
+                });
+                info!(user = %u, max = r.max_connections, "auto-logged in via BOOTSTRAP_USER");
+            }
+            Ok(r) => warn!("bootstrap auto-login rejected: {:?}", r.reason),
+            Err(e) => warn!("bootstrap auto-login failed: {e}"),
+        }
+    }
 
     let listen_port: u16 = env_parse("LISTEN_PORT", 8080);
     let static_dir = env_or("STATIC_DIR", "/app/static");
 
-    let app = Router::new()
+    // Public routes (no login required)
+    let public = Router::new()
+        .route("/api/login", post(h_login))
+        .route("/api/logout", post(h_logout))
+        .route("/api/me", get(h_me));
+
+    // Protected routes (require login)
+    let protected = Router::new()
         .route("/api/queue", get(h_queue))
         .route("/api/upload", post(h_upload))
         .route("/api/jobs/{id}", delete(h_cancel))
         .route("/api/search", get(h_search))
         .route("/api/grab/{id}", post(h_grab))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_login));
+
+    let app = Router::new()
+        .merge(public)
+        .merge(protected)
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
 
     let addr: SocketAddr = ([0, 0, 0, 0], listen_port).into();
     println!(
-        "nzbservice-gui starting: listen={addr}  static={static_dir}  logs={log_dir}  upstream={}",
-        env_or("NNTP_HOST", "nntp-proxy")
+        "nzbservice-gui starting: listen={addr}  static={static_dir}  logs={log_dir}  proxy={}:{}",
+        nntp_defaults.host, nntp_defaults.port
     );
     info!(%addr, "listening");
 

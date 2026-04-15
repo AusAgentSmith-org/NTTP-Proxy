@@ -1,3 +1,66 @@
+// ─── Login / Logout ──────────────────────────────────────────────────────
+
+const loginScreen = document.getElementById('login-screen');
+const appMain     = document.getElementById('app-main');
+const mainNav     = document.getElementById('main-nav');
+const userBar     = document.getElementById('user-bar');
+const userName    = document.getElementById('user-name');
+const loginForm   = document.getElementById('login-form');
+const loginUser   = document.getElementById('login-user');
+const loginPass   = document.getElementById('login-pass');
+const loginError  = document.getElementById('login-error');
+
+function showLogin() {
+  loginScreen.classList.remove('hidden');
+  appMain.classList.add('hidden');
+  mainNav.classList.add('hidden');
+  userBar.classList.add('hidden');
+}
+
+function showApp(session) {
+  loginScreen.classList.add('hidden');
+  appMain.classList.remove('hidden');
+  mainNav.classList.remove('hidden');
+  userBar.classList.remove('hidden');
+  userName.textContent = `${session.username} · ${session.max_connections} conns`;
+  refreshQueue();
+}
+
+async function checkSession() {
+  const r = await fetch('/api/me');
+  if (r.status === 200) {
+    showApp(await r.json());
+  } else {
+    showLogin();
+  }
+}
+
+loginForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  loginError.textContent = '';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: loginUser.value.trim(),
+        password: loginPass.value,
+      }),
+    });
+    if (!r.ok) throw new Error(await r.text());
+    const session = await r.json();
+    loginPass.value = '';
+    showApp(session);
+  } catch (err) {
+    loginError.textContent = err.message || 'Login failed';
+  }
+});
+
+document.getElementById('logout-btn').addEventListener('click', async () => {
+  await fetch('/api/logout', { method: 'POST' });
+  showLogin();
+});
+
 // ─── Tabs ────────────────────────────────────────────────────────────────
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => {
@@ -121,8 +184,25 @@ function escapeHtml(s) {
   })[c]);
 }
 
-setInterval(refreshQueue, 2000);
-refreshQueue();
+// Poll the queue continuously; if we get 401 the interval handler will
+// flip back to the login screen automatically.
+setInterval(async () => {
+  if (loginScreen.classList.contains('hidden')) {
+    refreshQueue();
+  }
+}, 2000);
+
+// React to a 401 anywhere by showing the login screen.
+const _origFetch = window.fetch;
+window.fetch = async (...args) => {
+  const r = await _origFetch(...args);
+  if (r.status === 401 && !args[0].toString().includes('/api/login')) {
+    showLogin();
+  }
+  return r;
+};
+
+checkSession();
 
 // ─── Upload ──────────────────────────────────────────────────────────────
 const dz = document.getElementById('dropzone');

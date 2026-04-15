@@ -9,14 +9,29 @@
 <body>
   <header>
     <h1>nzbservice</h1>
-    <nav>
+    <nav id="main-nav" class="hidden">
       <button class="tab active" data-tab="queue">Queue</button>
       <button class="tab" data-tab="upload">Upload</button>
       <button class="tab" data-tab="search">Search</button>
     </nav>
+    <div id="user-bar" class="hidden user-bar">
+      <span id="user-name" class="muted"></span>
+      <button id="logout-btn" class="icon-btn" title="Logout">⏻</button>
+    </div>
   </header>
 
-  <main>
+  <!-- ─── LOGIN SCREEN ────────────────────────────────────────────────── -->
+  <section id="login-screen" class="login-screen hidden">
+    <form id="login-form" autocomplete="off">
+      <h2>Sign in</h2>
+      <input type="text" id="login-user" placeholder="username" autocomplete="username" required>
+      <input type="password" id="login-pass" placeholder="password" autocomplete="current-password" required>
+      <button type="submit" class="button">Sign in</button>
+      <div id="login-error" class="error"></div>
+    </form>
+  </section>
+
+  <main id="app-main" class="hidden main-app">
     <!-- ─── QUEUE ─────────────────────────────────────────────────────────── -->
     <section id="tab-queue" class="tab-panel active">
       <h2>Active</h2>
