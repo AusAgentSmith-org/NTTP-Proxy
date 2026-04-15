@@ -169,3 +169,80 @@ impl UserPool {
             .collect()
     }
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tests
+// ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn acquire_and_release_reflects_session_count() {
+        let pool = Arc::new(UserPool::new());
+        let (guard1, _cancel1) = pool.acquire("alice", 5).await.unwrap();
+        let (guard2, _cancel2) = pool.acquire("alice", 5).await.unwrap();
+        assert_eq!(active_count(&pool, "alice"), 2);
+        drop(guard1);
+        assert_eq!(active_count(&pool, "alice"), 1);
+        drop(guard2);
+        assert_eq!(active_count(&pool, "alice"), 0);
+    }
+
+    #[tokio::test]
+    async fn cap_prevents_simultaneous_sessions_beyond_limit() {
+        let pool = Arc::new(UserPool::new());
+        let (_g1, _c1) = pool.acquire("bob", 1).await.unwrap();
+        // A second acquire must block because the cap is 1 and g1 is live.
+        let pool2 = pool.clone();
+        let timed = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            async move { pool2.acquire("bob", 1).await },
+        )
+        .await;
+        assert!(timed.is_err(), "second acquire should have blocked");
+    }
+
+    #[tokio::test]
+    async fn cancel_users_trips_all_active_sessions() {
+        let pool = Arc::new(UserPool::new());
+        let (_g1, mut rx1) = pool.acquire("carol", 3).await.unwrap();
+        let (_g2, mut rx2) = pool.acquire("carol", 3).await.unwrap();
+        let killed = pool.cancel_users(&["carol".to_string()]);
+        assert_eq!(killed, 2);
+        // Both cancel channels should now fire.
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut rx1).await,
+            Ok(Ok(()))
+        ));
+        assert!(matches!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut rx2).await,
+            Ok(Ok(()))
+        ));
+    }
+
+    #[tokio::test]
+    async fn drain_activity_reports_and_resets_deltas() {
+        let pool = Arc::new(UserPool::new());
+        let (_g, _rx) = pool.acquire("dave", 2).await.unwrap();
+        pool.record_bytes("dave", 1_000_000);
+        let first = pool.drain_activity();
+        let dave = first.iter().find(|e| e.username == "dave").unwrap();
+        assert_eq!(dave.bytes_delta, 1_000_000);
+        assert_eq!(dave.new_sessions, 1);
+        assert_eq!(dave.active_sessions, 1);
+
+        // Second drain: deltas should be zeroed, but active_sessions still 1.
+        let second = pool.drain_activity();
+        let dave = second.iter().find(|e| e.username == "dave").unwrap();
+        assert_eq!(dave.bytes_delta, 0);
+        assert_eq!(dave.new_sessions, 0);
+        assert_eq!(dave.active_sessions, 1);
+    }
+
+    fn active_count(pool: &Arc<UserPool>, user: &str) -> usize {
+        let g = pool.inner.lock();
+        g.get(user).map(|s| s.sessions.len()).unwrap_or(0)
+    }
+}

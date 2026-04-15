@@ -102,41 +102,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let admin_routes = Router::new()
-        .route("/api/admin/users", get(h_admin_users).post(h_admin_create_user))
-        .route("/api/admin/users/{username}", delete(h_admin_delete_user))
-        .route("/api/admin/users/{username}/lock", put(h_admin_set_lock))
-        .route(
-            "/api/admin/users/{username}/max_connections",
-            put(h_admin_set_max),
-        )
-        .route("/api/admin/users/{username}/sessions", get(h_admin_user_sessions))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_admin,
-        ));
-
-    // Public auth routes (no bearer token — the password IS the auth).
-    let auth_routes = Router::new()
-        .route("/api/auth/login", post(h_auth_login))
-        .route("/api/auth/logout", post(h_auth_logout));
-
-    let proxy_routes = Router::new()
-        .route("/api/proxy/validate", post(h_proxy_validate))
-        .route("/api/proxy/activity", post(h_proxy_activity))
-        .route("/api/proxy/locked", get(h_proxy_locked))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            require_proxy,
-        ));
-
     let static_dir = env_or("STATIC_DIR", "/app/static");
 
-    let app = Router::new()
-        .route("/health", get(h_health))
-        .merge(admin_routes)
-        .merge(proxy_routes)
-        .merge(auth_routes)
+    let app = build_api_router(state.clone())
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
 
@@ -150,4 +118,171 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Build the full API router without the static-file fallback. Used from
+/// `main()` and integration tests. Caller is responsible for calling
+/// `.with_state(...)` (and `.fallback_service(...)` if serving static).
+fn build_api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
+    let admin_routes = Router::new()
+        .route("/api/admin/users", get(h_admin_users).post(h_admin_create_user))
+        .route("/api/admin/users/{username}", delete(h_admin_delete_user))
+        .route("/api/admin/users/{username}/lock", put(h_admin_set_lock))
+        .route("/api/admin/users/{username}/max_connections", put(h_admin_set_max))
+        .route("/api/admin/users/{username}/sessions", get(h_admin_user_sessions))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_admin));
+
+    let auth_routes = Router::new()
+        .route("/api/auth/login", post(h_auth_login))
+        .route("/api/auth/logout", post(h_auth_logout));
+
+    let proxy_routes = Router::new()
+        .route("/api/proxy/validate", post(h_proxy_validate))
+        .route("/api/proxy/activity", post(h_proxy_activity))
+        .route("/api/proxy/locked", get(h_proxy_locked))
+        .route_layer(middleware::from_fn_with_state(state, require_proxy));
+
+    Router::new()
+        .route("/health", get(h_health))
+        .merge(admin_routes)
+        .merge(proxy_routes)
+        .merge(auth_routes)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Integration tests — exercise the HTTP surface end-to-end via
+// tower::ServiceExt::oneshot, covering the full login → validate → lock
+// → revoked-session chain.
+// ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    fn build_test_app() -> (axum::Router, Arc<AppState>, tempfile::NamedTempFile) {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let store = Store::open(f.path()).unwrap();
+        store.create("alice".into(), "secret".into(), 5);
+
+        let state = Arc::new(AppState {
+            store,
+            config: Config {
+                admin_token: "admin-t".into(),
+                proxy_token: "proxy-t".into(),
+                session_ttl_secs: 3600,
+            },
+        });
+        let router = build_api_router(state.clone()).with_state(state.clone());
+        (router, state, f)
+    }
+
+    async fn body_json(res: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn req_json(method: &str, path: &str, bearer: Option<&str>, body: serde_json::Value) -> Request<Body> {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(t) = bearer {
+            b = b.header("authorization", format!("Bearer {t}"));
+        }
+        b.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn full_login_validate_lock_revoke_chain() {
+        let (app, _state, _tmp) = build_test_app();
+
+        // 1. Login with the right password → session key.
+        let res = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/api/auth/login",
+                None,
+                serde_json::json!({"username":"alice","password":"secret"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        let key = body["session_key"].as_str().unwrap().to_string();
+        assert_eq!(body["max_connections"], 5);
+
+        // 2. Proxy validate with session key → allowed, auth_method=session.
+        let res = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/api/proxy/validate",
+                Some("proxy-t"),
+                serde_json::json!({"username":"alice","password":&key}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["allowed"], true);
+        assert_eq!(body["auth_method"], "session");
+
+        // 3. Lock alice — should revoke sessions as a side-effect.
+        let res = app
+            .clone()
+            .oneshot(req_json(
+                "PUT",
+                "/api/admin/users/alice/lock",
+                Some("admin-t"),
+                serde_json::json!({"locked":true}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["revoked_sessions"], 1);
+
+        // 4. Same session key now rejected.
+        let res = app
+            .clone()
+            .oneshot(req_json(
+                "POST",
+                "/api/proxy/validate",
+                Some("proxy-t"),
+                serde_json::json!({"username":"alice","password":&key}),
+            ))
+            .await
+            .unwrap();
+        let body = body_json(res).await;
+        assert_eq!(body["allowed"], false);
+    }
+
+    #[tokio::test]
+    async fn wrong_password_returns_unauthorised() {
+        let (app, _state, _tmp) = build_test_app();
+        let res = app
+            .oneshot(req_json(
+                "POST",
+                "/api/auth/login",
+                None,
+                serde_json::json!({"username":"alice","password":"NOT RIGHT"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn admin_requires_bearer_token() {
+        let (app, _state, _tmp) = build_test_app();
+        let res = app
+            .oneshot(Request::builder().uri("/api/admin/users").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
 }

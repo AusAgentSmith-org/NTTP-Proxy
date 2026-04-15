@@ -464,3 +464,126 @@ pub struct ActivityEntry {
     pub bytes_delta: u64,
     pub new_sessions: u32,
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tests
+// ────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmp_store() -> (Store, tempfile::NamedTempFile) {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let s = Store::open(f.path()).unwrap();
+        (s, f)
+    }
+
+    #[test]
+    fn create_list_get_delete() {
+        let (store, _f) = tmp_store();
+        assert!(store.list().is_empty());
+        assert!(store.create("alice".into(), "pw", 5));
+        assert!(!store.create("alice".into(), "again", 10), "duplicate must fail");
+        let u = store.get("alice").unwrap();
+        assert_eq!(u.max_connections, 5);
+        assert!(u.verify_password("pw"));
+        assert!(!u.verify_password("wrong"));
+        assert!(store.delete("alice"));
+        assert!(store.get("alice").is_none());
+    }
+
+    #[test]
+    fn lock_revoke_and_locked_list() {
+        let (store, _f) = tmp_store();
+        store.create("bob".into(), "pw", 2);
+        assert!(store.locked_usernames().is_empty());
+        assert!(store.set_locked("bob", true));
+        assert_eq!(store.locked_usernames(), vec!["bob"]);
+        assert!(store.set_locked("bob", false));
+        assert!(store.locked_usernames().is_empty());
+    }
+
+    #[test]
+    fn sessions_roundtrip_and_validate() {
+        let (store, _f) = tmp_store();
+        store.create("carol".into(), "pw", 3);
+        // Wrong password → no session
+        assert!(store.login("carol", "WRONG", None).is_none());
+        // Right password → session
+        let key = store.login("carol", "pw", Some(3600)).unwrap();
+        assert_eq!(key.len(), 48);
+
+        let u = store.validate_session(&key).unwrap();
+        assert_eq!(u.username, "carol");
+        assert_eq!(u.max_connections, 3);
+
+        // Revoke explicit
+        assert!(store.revoke_session(&key));
+        assert!(store.validate_session(&key).is_none());
+
+        // Lock cascade: mint new, lock, revoke_sessions_for_user
+        let k1 = store.login("carol", "pw", None).unwrap();
+        let k2 = store.login("carol", "pw", None).unwrap();
+        assert!(store.validate_session(&k1).is_some());
+        store.set_locked("carol", true);
+        let n = store.revoke_sessions_for_user("carol");
+        assert_eq!(n, 2);
+        assert!(store.validate_session(&k1).is_none());
+        assert!(store.validate_session(&k2).is_none());
+    }
+
+    #[test]
+    fn apply_activity_accumulates_and_survives_reopen() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        {
+            let store = Store::open(f.path()).unwrap();
+            store.create("dave".into(), "pw", 5);
+            store.apply_activity(&[ActivityEntry {
+                username: "dave".into(),
+                active_sessions: 3,
+                bytes_delta: 1_000_000,
+                new_sessions: 2,
+            }]);
+            let u = store.get("dave").unwrap();
+            assert_eq!(u.bytes_total, 1_000_000);
+            assert_eq!(u.total_sessions, 2);
+            assert_eq!(u.active_sessions, 3);
+            assert!(u.last_seen.is_some());
+        }
+        // Reopen — persisted fields survive, runtime ones reset.
+        let store = Store::open(f.path()).unwrap();
+        let u = store.get("dave").unwrap();
+        assert_eq!(u.bytes_total, 1_000_000, "bytes_total persisted");
+        assert_eq!(u.total_sessions, 2, "total_sessions persisted");
+        assert!(u.last_seen.is_some(), "last_seen persisted");
+        assert_eq!(u.active_sessions, 0, "active_sessions is runtime-only");
+        assert_eq!(u.bytes_per_sec, 0, "bytes_per_sec is runtime-only");
+    }
+
+    #[test]
+    fn second_activity_report_derives_bytes_per_sec() {
+        let (store, _f) = tmp_store();
+        store.create("eve".into(), "pw", 5);
+
+        // First report — no prior, rate is 0.
+        store.apply_activity(&[ActivityEntry {
+            username: "eve".into(),
+            active_sessions: 1,
+            bytes_delta: 0,
+            new_sessions: 1,
+        }]);
+        assert_eq!(store.get("eve").unwrap().bytes_per_sec, 0);
+
+        // Wait a moment, then report 100 KB of delta — rate must be > 0.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        store.apply_activity(&[ActivityEntry {
+            username: "eve".into(),
+            active_sessions: 1,
+            bytes_delta: 100_000,
+            new_sessions: 0,
+        }]);
+        let rate = store.get("eve").unwrap().bytes_per_sec;
+        assert!(rate > 0, "rate should be derived; got {rate}");
+    }
+}
