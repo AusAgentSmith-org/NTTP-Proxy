@@ -53,7 +53,8 @@ async fn main() -> anyhow::Result<()> {
         proxy_token: env_or("PROXY_TOKEN", "proxy-dev-token"),
     };
 
-    let store = Store::new();
+    let db_path = env_or("DATABASE_PATH", "/data/app-server.db");
+    let store = Store::open(&db_path)?;
 
     // Optional bootstrap user from env so the proxy + GUI work out of the box.
     if let (Ok(u), Ok(p), max) = (

@@ -17,8 +17,9 @@ COPY static /app/static
 ENV LOG_DIR=/logs
 ENV STATIC_DIR=/app/static
 ENV LISTEN_PORT=8090
+ENV DATABASE_PATH=/data/app-server.db
 
 EXPOSE 8090
-VOLUME ["/logs"]
+VOLUME ["/logs", "/data"]
 
 CMD ["nzbservice-app-server"]

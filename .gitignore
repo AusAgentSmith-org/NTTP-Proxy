@@ -2,5 +2,6 @@ target/
 nzbs/
 downloads/
 logs/
+data/
 *.swp
 .env

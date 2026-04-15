@@ -2,21 +2,26 @@
 
 Rough priority order, top = next. Scratchpad. Prune as things change.
 
-## Recently done (in this session)
+## Recently done
 
 - [x] nntp-proxy: TLS upstream pool, credential substitution, pass-through
 - [x] CLI test client (NZBFailTest port) with env-var config + Docker
 - [x] gui: Axum + plain HTML/JS — upload, queue, cancel
 - [x] gui: nzb.indexarr search + grab (POST /api/grab/:id)
-- [x] app-server: in-memory user store, admin + proxy APIs, admin UI
+- [x] gui: per-user login/logout, hot-swap NNTP creds via update_servers
+- [x] app-server: admin + proxy APIs, admin UI
 - [x] proxy ↔ app-server: validate on AUTHINFO, per-user cap, activity
       reporting, lock poller drops sessions within ~2s
 - [x] file logging via tracing-appender (one rolling file per service)
+- [x] **app-server: SQLite persistence** — users, locks, bytes_total,
+      total_sessions, last_seen all survive restart. Runtime
+      active_sessions resets on restart by design.
 
 ## Known issues in the current POC
 
-- [ ] **App-server is in-memory.** Restart loses every user, every counter,
-      every lock. SQLite via `rusqlite` would be a small lift.
+- [ ] **Gui session is single-global-server-side state.** Two browsers
+      hitting the same gui share one session. Needs per-session cookies
+      for real multi-client use (rare for a personal gui; low priority).
 - [ ] **No web auth for end-users.** Anyone who can reach :8080 can use the
       gui. The gui sends one shared credential pair to the proxy. Need a
       proper login flow + per-user gui sessions.
@@ -36,8 +41,16 @@ Rough priority order, top = next. Scratchpad. Prune as things change.
 
 ## Near-term — make it less of a toy
 
-- [ ] **Persist app-server state.** SQLite file under `/data` mounted from
-      host. Keep the in-memory store as a write-through cache.
+- [ ] **Logout should stop in-flight downloads.** `update_servers([])`
+      removes configured servers but existing per-job workers hold their
+      connections until the current article finishes. Adding
+      `remove_job` for every active job in `h_logout` fixes it — but at
+      the cost of progress. Alternative: a Pause feature that preserves
+      the queue and resumes on next login.
+- [ ] **"active_sessions" is misleading when connections are idle-pooled.**
+      The count includes TCP connections that nzb-web's pool holds open
+      for reuse between downloads. Either rename to "open_connections"
+      or derive activity from recent byte rate.
 - [ ] **Per-user web login on the gui.** Username/password → session token
       → API calls authenticated. Same credentials the user gets when admin
       creates them. Removes the shared-credentials hack in compose env.

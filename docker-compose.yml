@@ -9,10 +9,13 @@ services:
       - "8090:8090"
     volumes:
       - ./logs:/logs
+      - ./data:/data          # SQLite DB lives here
     environment:
+      DATABASE_PATH: /data/app-server.db
       ADMIN_TOKEN: ${ADMIN_TOKEN:-admin-dev-token}
       PROXY_TOKEN: ${PROXY_TOKEN:-proxy-dev-token}
-      # Optional bootstrap user — created on first start so things work out of the box.
+      # Optional bootstrap user — created on first start if the DB is fresh.
+      # Safe to leave set: existing users are preserved (INSERT OR IGNORE).
       BOOTSTRAP_USER: ${BOOTSTRAP_USER:-guiuser}
       BOOTSTRAP_PASS: ${BOOTSTRAP_PASS:-guipass}
       BOOTSTRAP_MAX_CONNECTIONS: ${BOOTSTRAP_MAX_CONNECTIONS:-8}
