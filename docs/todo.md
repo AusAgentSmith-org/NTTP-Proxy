@@ -54,17 +54,25 @@ Rough priority order, top = next. Scratchpad. Prune as things change.
       logs "patch was not used" warnings on every build. Expected; only
       worth fixing when local libs introduce a breaking change we need.
 
-## Next up — pre-internet-rollout
+## Recently done (internet-facing prep)
 
-- [ ] **NNTPS listener on the proxy (:563).** Plaintext AUTHINFO PASS is
-      fine for localhost compose; once the proxy's on the public
-      internet, TLS is mandatory. Self-signed cert generated at startup
-      in `/data/tls/`, persists across restarts.
+- [x] **NNTPS listener on the proxy (:563).** rcgen self-signed cert,
+      persisted to `/data/tls/`, SHA-256 fingerprint surfaced on stdout,
+      in `/data/tls/fingerprint`, and via app-server `GET /api/fingerprint`.
+      Session handler made generic over transport so plain + TLS share
+      one code path.
+
+## Next up — internet rollout
+
 - [ ] **Cert fingerprint pinning in the bundled client.** We control the
-      binaries — embed the expected fingerprint at build time (or fetch
-      it once at install via a rendezvous URL). rustls
+      binaries — embed the expected fingerprint at build time or fetch
+      it from `GET /api/fingerprint` once at install. rustls
       `ServerCertVerifier` checks fingerprint only; no CA chain, no
-      Let's Encrypt, no DNS dance.
+      Let's Encrypt. Server side is ready (see recently done above).
+- [ ] **Gui → NNTPS.** Currently the gui hits the proxy on :119 plain.
+      When everything's on one host this is fine; for a split
+      deployment (proxy on public VM, gui elsewhere) the gui's
+      `ServerConfig` should flip to `ssl=true`, port 563.
 - [ ] **Logout stops in-flight downloads.** `update_servers([])` removes
       configured servers but existing per-job workers hold connections
       until the current article finishes. Either drain via `remove_job`
