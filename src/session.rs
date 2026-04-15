@@ -12,8 +12,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -25,14 +24,17 @@ use crate::user_pool::{SessionGuard, UserPool};
 /// Default per-user cap when running without an app-server (open mode).
 const OPEN_MODE_CAP: u32 = 32;
 
-pub async fn handle(
-    socket: TcpStream,
+pub async fn handle<S>(
+    socket: S,
     peer: SocketAddr,
     _cfg: Arc<ProxyConfig>,
     pool: Arc<UpstreamPool>,
     user_pool: Arc<UserPool>,
     app: Option<AppClient>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
     let mut client = BufReader::new(socket);
 
     write_client(&mut client, b"200 nntp-proxy ready - posting ok\r\n").await?;
@@ -251,15 +253,19 @@ pub async fn handle(
     }
 }
 
-async fn read_line_owned(
-    client: &mut BufReader<TcpStream>,
-) -> std::io::Result<Option<String>> {
+async fn read_line_owned<S>(client: &mut BufReader<S>) -> std::io::Result<Option<String>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut line = String::new();
     let n = client.read_line(&mut line).await?;
     if n == 0 { Ok(None) } else { Ok(Some(line)) }
 }
 
-async fn write_client(client: &mut BufReader<TcpStream>, data: &[u8]) -> anyhow::Result<()> {
+async fn write_client<S>(client: &mut BufReader<S>, data: &[u8]) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     client.get_mut().write_all(data).await?;
     client.get_mut().flush().await?;
     Ok(())

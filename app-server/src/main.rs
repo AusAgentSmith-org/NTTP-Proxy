@@ -13,8 +13,9 @@ use tracing::info;
 
 use crate::handlers::{
     h_admin_create_user, h_admin_delete_user, h_admin_set_lock, h_admin_set_max,
-    h_admin_user_sessions, h_admin_users, h_auth_login, h_auth_logout, h_health,
-    h_proxy_activity, h_proxy_locked, h_proxy_validate, require_admin, require_proxy,
+    h_admin_user_sessions, h_admin_users, h_auth_login, h_auth_logout, h_fingerprint,
+    h_health, h_proxy_activity, h_proxy_locked, h_proxy_validate, require_admin,
+    require_proxy,
 };
 use crate::state::{AppState, Config};
 use crate::store::Store;
@@ -52,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
         admin_token: env_or("ADMIN_TOKEN", "admin-dev-token"),
         proxy_token: env_or("PROXY_TOKEN", "proxy-dev-token"),
         session_ttl_secs: env_parse("SESSION_TTL_SECS", 30 * 24 * 60 * 60), // 30 days
+        tls_fingerprint_path: env_or("TLS_FINGERPRINT_PATH", "/data/tls/fingerprint"),
     };
 
     let db_path = env_or("DATABASE_PATH", "/data/app-server.db");
@@ -144,6 +146,7 @@ fn build_api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
 
     Router::new()
         .route("/health", get(h_health))
+        .route("/api/fingerprint", get(h_fingerprint))
         .merge(admin_routes)
         .merge(proxy_routes)
         .merge(auth_routes)
@@ -173,6 +176,7 @@ mod integration_tests {
                 admin_token: "admin-t".into(),
                 proxy_token: "proxy-t".into(),
                 session_ttl_secs: 3600,
+                tls_fingerprint_path: "/tmp/does-not-exist".into(),
             },
         });
         let router = build_api_router(state.clone()).with_state(state.clone());
@@ -274,6 +278,43 @@ mod integration_tests {
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn fingerprint_endpoint_returns_503_when_missing_else_200() {
+        // Missing
+        let (app, _state, _tmp) = build_test_app();
+        let res = app
+            .clone()
+            .oneshot(Request::builder().uri("/api/fingerprint").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Present
+        let fp_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(fp_file.path(), "deadbeef0123").unwrap();
+        let (_f_state, state, _t2) = build_test_app();
+        // Rebuild state with our fingerprint path
+        let state = Arc::new(AppState {
+            store: Store::open(_t2.path()).unwrap(),
+            config: Config {
+                admin_token: "admin-t".into(),
+                proxy_token: "proxy-t".into(),
+                session_ttl_secs: 3600,
+                tls_fingerprint_path: fp_file.path().to_string_lossy().into_owned(),
+            },
+        });
+        let _ = state;
+        let app2 = build_api_router(state.clone()).with_state(state);
+        let res = app2
+            .oneshot(Request::builder().uri("/api/fingerprint").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = body_json(res).await;
+        assert_eq!(body["fingerprint"], "deadbeef0123");
+        assert_eq!(body["algorithm"], "sha256");
     }
 
     #[tokio::test]

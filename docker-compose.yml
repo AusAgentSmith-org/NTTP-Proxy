@@ -22,15 +22,17 @@ services:
       RUST_LOG: ${RUST_LOG:-info,nzbservice_app_server=debug}
     restart: unless-stopped
 
-  # ── NNTP Proxy (NNTP on :1119; validates auth via app-server) ────────────────
+  # ── NNTP Proxy (plain NNTP on :1119, NNTPS on :5563) ─────────────────────────
   nntp-proxy:
     build:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "1119:119"
+      - "1119:119"      # plain, for local/internal use
+      - "5563:563"      # NNTPS, for internet-facing clients
     volumes:
       - ./logs:/logs
+      - ./data:/data    # TLS cert + key live under /data/tls/
     environment:
       NNTP_HOST: ${NNTP_HOST:-aunews.frugalusenet.com}
       NNTP_PORT: ${NNTP_PORT:-563}
@@ -39,6 +41,8 @@ services:
       NNTP_CONNECTIONS: ${NNTP_CONNECTIONS:-15}
       APP_SERVER_URL: http://app-server:8090
       PROXY_TOKEN: ${PROXY_TOKEN:-proxy-dev-token}
+      TLS_PORT: "563"
+      TLS_DIR: /data/tls
       RUST_LOG: ${RUST_LOG:-info,nntp_proxy=debug}
     depends_on:
       - app-server

@@ -1,8 +1,12 @@
 use std::env;
 
 pub struct ProxyConfig {
-    /// Port to listen on for incoming NNTP clients (plain TCP, no TLS)
+    /// Port to listen on for plain-TCP NNTP clients (no TLS).
     pub listen_port: u16,
+    /// Port to listen on for NNTPS clients (TLS). 0 = disabled.
+    pub tls_port: u16,
+    /// Directory holding cert.pem + key.pem. Generated on first start if empty.
+    pub tls_dir: String,
     /// Upstream Usenet server hostname
     pub upstream_host: String,
     /// Upstream Usenet server port (TLS)
@@ -30,6 +34,11 @@ impl ProxyConfig {
             listen_port: env::var("LISTEN_PORT")
                 .unwrap_or_else(|_| "119".into())
                 .parse()?,
+            tls_port: env::var("TLS_PORT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(563),
+            tls_dir: env::var("TLS_DIR").unwrap_or_else(|_| "/data/tls".into()),
             upstream_host: env::var("NNTP_HOST")
                 .unwrap_or_else(|_| "aunews.frugalusenet.com".into()),
             upstream_port: env::var("NNTP_PORT")

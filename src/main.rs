@@ -2,11 +2,14 @@ mod app_client;
 mod config;
 mod pool;
 mod session;
+mod tls;
 mod user_pool;
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 
 use crate::app_client::AppClient;
@@ -68,20 +71,116 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.listen_port)).await?;
-    info!(addr = %listener.local_addr()?, "listening for NNTP clients");
+    // ── TLS setup (optional) ──────────────────────────────────────────────
+    let tls = if cfg.tls_port != 0 {
+        match tls::load_or_generate(Path::new(&cfg.tls_dir)) {
+            Ok(t) => {
+                // Also write fingerprint next to the cert for the app-server to pick up.
+                let fp_path = Path::new(&cfg.tls_dir).join("fingerprint");
+                let _ = std::fs::write(&fp_path, &t.fingerprint);
+                println!("NNTPS fingerprint: {}", t.fingerprint);
+                Some(t)
+            }
+            Err(e) => {
+                warn!("TLS init failed, skipping NNTPS listener: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
+    // ── Spawn plain listener ──────────────────────────────────────────────
+    let plain_listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.listen_port)).await?;
+    info!(addr = %plain_listener.local_addr()?, "listening for NNTP clients (plain)");
+    {
+        let pool = Arc::clone(&pool);
+        let cfg = Arc::clone(&cfg);
+        let user_pool = Arc::clone(&user_pool);
+        let app_client = app_client.clone();
+        tokio::spawn(async move {
+            accept_plain_loop(plain_listener, cfg, pool, user_pool, app_client).await;
+        });
+    }
+
+    // ── Spawn TLS listener ────────────────────────────────────────────────
+    if let Some(t) = tls {
+        let tls_listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.tls_port)).await?;
+        info!(addr = %tls_listener.local_addr()?, "listening for NNTPS clients");
+        let acceptor = TlsAcceptor::from(t.config);
+        let pool = Arc::clone(&pool);
+        let cfg2 = Arc::clone(&cfg);
+        let user_pool = Arc::clone(&user_pool);
+        let app_client = app_client.clone();
+        tokio::spawn(async move {
+            accept_tls_loop(tls_listener, acceptor, cfg2, pool, user_pool, app_client).await;
+        });
+    }
+
+    // Keep main alive; both listeners run in spawned tasks.
+    std::future::pending::<()>().await;
+    Ok(())
+}
+
+async fn accept_plain_loop(
+    listener: tokio::net::TcpListener,
+    cfg: Arc<config::ProxyConfig>,
+    pool: Arc<pool::UpstreamPool>,
+    user_pool: Arc<UserPool>,
+    app_client: Option<AppClient>,
+) {
     loop {
-        let (socket, peer) = listener.accept().await?;
-        info!(%peer, "client connected");
-
+        let (socket, peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("plain accept failed: {e}");
+                continue;
+            }
+        };
+        info!(%peer, "client connected (plain)");
         let pool = Arc::clone(&pool);
         let cfg = Arc::clone(&cfg);
         let user_pool = Arc::clone(&user_pool);
         let app = app_client.clone();
-
         tokio::spawn(async move {
             if let Err(e) = session::handle(socket, peer, cfg, pool, user_pool, app).await {
+                warn!(%peer, "session ended with error: {e}");
+            }
+        });
+    }
+}
+
+async fn accept_tls_loop(
+    listener: tokio::net::TcpListener,
+    acceptor: TlsAcceptor,
+    cfg: Arc<config::ProxyConfig>,
+    pool: Arc<pool::UpstreamPool>,
+    user_pool: Arc<UserPool>,
+    app_client: Option<AppClient>,
+) {
+    loop {
+        let (tcp, peer) = match listener.accept().await {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("tls accept failed: {e}");
+                continue;
+            }
+        };
+        let acceptor = acceptor.clone();
+        let pool = Arc::clone(&pool);
+        let cfg = Arc::clone(&cfg);
+        let user_pool = Arc::clone(&user_pool);
+        let app = app_client.clone();
+        tokio::spawn(async move {
+            let stream = match acceptor.accept(tcp).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(%peer, "TLS handshake failed: {e}");
+                    return;
+                }
+            };
+            info!(%peer, "client connected (TLS)");
+            if let Err(e) = session::handle(stream, peer, cfg, pool, user_pool, app).await {
                 warn!(%peer, "session ended with error: {e}");
             }
         });

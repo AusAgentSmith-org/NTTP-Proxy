@@ -315,3 +315,32 @@ pub async fn h_health() -> Response {
         .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/plain"));
     r
 }
+
+/// Public endpoint: returns the proxy's NNTPS cert SHA-256 fingerprint so a
+/// bundled client can pin it. Fingerprints are not secrets; no auth needed.
+///
+/// Source: the proxy writes `/data/tls/fingerprint` on startup; we serve it
+/// verbatim from there. If the file is missing the client hasn't yet
+/// generated a cert — return 503 so the caller knows to retry.
+pub async fn h_fingerprint(State(st): State<Arc<AppState>>) -> Response {
+    let path = std::path::Path::new(&st.config.tls_fingerprint_path);
+    match std::fs::read_to_string(path) {
+        Ok(s) => {
+            let fp = s.trim().to_string();
+            let body = serde_json::json!({ "fingerprint": fp, "algorithm": "sha256" });
+            let mut r = Response::new(Body::from(body.to_string()));
+            r.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            r
+        }
+        Err(_) => {
+            let mut r = Response::new(Body::from(
+                r#"{"error":"fingerprint not available yet"}"#,
+            ));
+            *r.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+            r.headers_mut()
+                .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            r
+        }
+    }
+}
