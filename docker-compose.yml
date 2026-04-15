@@ -38,6 +38,8 @@ services:
       NNTP_CONNECTIONS: "8"
       NNTP_SSL: "false"
       MAX_ACTIVE_DOWNLOADS: "2"
+      INDEXARR_URL: ${INDEXARR_URL:-https://nzb.indexarr.net}
+      INDEXARR_API_KEY: ${INDEXARR_API_KEY:-}
       RUST_LOG: ${RUST_LOG:-info,nzb_web=debug,nzb_nntp=info}
     depends_on:
       - nntp-proxy

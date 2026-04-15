@@ -52,19 +52,27 @@
       <div id="upload-result"></div>
     </section>
 
-    <!-- ─── SEARCH (stubbed) ──────────────────────────────────────────────── -->
+    <!-- ─── SEARCH ────────────────────────────────────────────────────────── -->
     <section id="tab-search" class="tab-panel">
-      <h2>Search</h2>
+      <h2>Search nzb.indexarr</h2>
       <form id="search-form" autocomplete="off">
-        <input type="text" id="search-q" placeholder="Search term — e.g. movie or show title"
-               disabled>
-        <button type="submit" disabled>Search</button>
+        <input type="text" id="search-q" placeholder="Search term — e.g. movie or show title">
+        <button type="submit" class="button">Search</button>
       </form>
-      <div class="notice">
-        Search is <strong>not implemented yet</strong>. Integration with
-        <code>nzb.indexarr</code> is pending. For now, upload <code>.nzb</code>
-        files via the Upload tab.
-      </div>
+      <div id="search-status" class="muted" style="margin: .75rem 0;"></div>
+      <table id="search-table" class="jobs hidden">
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Group</th>
+            <th>Posted</th>
+            <th>Size</th>
+            <th>Files</th>
+            <th class="actions-col"></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
     </section>
   </main>
 

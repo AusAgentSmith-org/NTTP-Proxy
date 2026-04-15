@@ -168,3 +168,90 @@ async function upload(fileList) {
   }
   input.value = '';
 }
+
+// ─── Search ──────────────────────────────────────────────────────────────
+const searchForm  = document.getElementById('search-form');
+const searchInput = document.getElementById('search-q');
+const searchTable = document.getElementById('search-table');
+const searchBody  = searchTable.querySelector('tbody');
+const searchStatus = document.getElementById('search-status');
+
+const fmtAge = (epochSecs) => {
+  if (!epochSecs) return '—';
+  const ageSecs = Math.floor(Date.now() / 1000) - epochSecs;
+  if (ageSecs < 0) return 'just now';
+  const d = Math.floor(ageSecs / 86400);
+  if (d > 365) return `${(d/365).toFixed(1)}y`;
+  if (d > 30)  return `${Math.floor(d/30)}mo`;
+  if (d > 0)   return `${d}d`;
+  const h = Math.floor(ageSecs / 3600);
+  if (h > 0)   return `${h}h`;
+  const m = Math.floor(ageSecs / 60);
+  return `${m}m`;
+};
+
+searchForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = searchInput.value.trim();
+  if (!q) return;
+  searchStatus.textContent = 'Searching…';
+  searchTable.classList.add('hidden');
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=50`);
+    if (!r.ok) throw new Error(await r.text());
+    const data = await r.json();
+    if (data.error) {
+      searchStatus.textContent = data.error;
+      return;
+    }
+    const releases = data.releases || [];
+    if (!releases.length) {
+      searchStatus.textContent = 'No results.';
+      return;
+    }
+    searchStatus.textContent = `${releases.length} result(s).`;
+    searchTable.classList.remove('hidden');
+    searchBody.innerHTML = releases.map(r => `
+      <tr data-rel-id="${r.id}">
+        <td class="name" title="${escapeHtml(r.name)}">${escapeHtml(truncate(r.name, 80))}</td>
+        <td class="num">${escapeHtml(r.newsgroup || '—')}</td>
+        <td class="num">${escapeHtml(fmtAge(r.posted_at))}</td>
+        <td class="num">${fmtBytes(r.total_bytes)}</td>
+        <td class="num">${r.total_files ?? '—'}</td>
+        <td class="actions">
+          <button class="icon-btn grab" title="Download" data-action="grab">↓</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    console.error('search failed', err);
+    searchStatus.textContent = `Error: ${err.message}`;
+  }
+});
+
+function truncate(s, n) {
+  if (!s || s.length <= n) return s || '';
+  return s.slice(0, n - 1) + '…';
+}
+
+searchBody.addEventListener('click', async (e) => {
+  const btn = e.target.closest('button[data-action="grab"]');
+  if (!btn) return;
+  const row = btn.closest('tr');
+  const id = row.dataset.relId;
+  if (!id) return;
+  btn.disabled = true;
+  btn.textContent = '…';
+  try {
+    const r = await fetch(`/api/grab/${encodeURIComponent(id)}`, { method: 'POST' });
+    if (!r.ok) throw new Error(await r.text());
+    btn.textContent = '✓';
+    btn.title = 'Added to queue';
+    refreshQueue();
+  } catch (err) {
+    console.error('grab failed', err);
+    btn.disabled = false;
+    btn.textContent = '↓';
+    alert(`Grab failed: ${err.message}`);
+  }
+});

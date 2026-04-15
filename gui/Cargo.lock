@@ -1519,6 +1519,7 @@ dependencies = [
  "nzb-nntp",
  "nzb-postproc",
  "nzb-web",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",

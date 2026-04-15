@@ -34,6 +34,32 @@ use nzb_web::log_buffer::LogBuffer;
 #[derive(Clone)]
 struct AppState {
     queue: Arc<QueueManager>,
+    indexarr: IndexarrClient,
+}
+
+#[derive(Clone)]
+struct IndexarrClient {
+    base_url: String,
+    api_key: Option<String>,
+    http: reqwest::Client,
+}
+
+impl IndexarrClient {
+    fn from_env() -> Self {
+        Self {
+            base_url: std::env::var("INDEXARR_URL")
+                .unwrap_or_else(|_| "https://nzb.indexarr.net".into()),
+            api_key: std::env::var("INDEXARR_API_KEY").ok(),
+            http: reqwest::Client::builder()
+                .user_agent("nzbservice-gui/0.1")
+                .build()
+                .expect("reqwest client"),
+        }
+    }
+
+    fn is_configured(&self) -> bool {
+        self.api_key.is_some()
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -213,6 +239,8 @@ async fn h_upload(
 #[derive(Deserialize)]
 struct SearchQuery {
     q: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
 
 async fn h_cancel(
@@ -226,13 +254,132 @@ async fn h_cancel(
     Ok(Json(serde_json::json!({ "removed": id })))
 }
 
-async fn h_search(Query(q): Query<SearchQuery>) -> Json<serde_json::Value> {
-    // Stub — real implementation will hit nzb.indexarr once available.
-    Json(serde_json::json!({
-        "query": q.q.unwrap_or_default(),
-        "results": [],
-        "note": "Search is stubbed. Integration with nzb.indexarr is pending — for now, use the Upload tab.",
-    }))
+async fn h_search(
+    State(st): State<AppState>,
+    Query(q): Query<SearchQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let Some(api_key) = st.indexarr.api_key.as_ref() else {
+        return Ok(Json(serde_json::json!({
+            "query": q.q.unwrap_or_default(),
+            "releases": [],
+            "error": "INDEXARR_API_KEY not configured",
+        })));
+    };
+
+    let query = q.q.clone().unwrap_or_default();
+    let limit = q.limit.unwrap_or(25).min(100);
+    let offset = q.offset.unwrap_or(0);
+
+    let url = format!("{}/api/releases", st.indexarr.base_url);
+    let resp = st
+        .indexarr
+        .http
+        .get(&url)
+        .query(&[
+            ("q", query.as_str()),
+            ("limit", &limit.to_string()),
+            ("offset", &offset.to_string()),
+            ("apikey", api_key.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("indexarr: {e}")))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("decode: {e}")))?;
+
+    if !status.is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("indexarr {status}: {body}"),
+        ));
+    }
+
+    Ok(Json(body))
+}
+
+/// Grab: fetch NZB from indexarr by release id, parse it, enqueue it.
+async fn h_grab(
+    State(st): State<AppState>,
+    AxumPath(id): AxumPath<u64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let Some(api_key) = st.indexarr.api_key.as_ref() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "INDEXARR_API_KEY not configured".into(),
+        ));
+    };
+
+    let url = format!("{}/api/releases/{}/nzb", st.indexarr.base_url, id);
+    info!(%id, "grabbing NZB from indexarr");
+
+    let resp = st
+        .indexarr
+        .http
+        .get(&url)
+        .query(&[("apikey", api_key.as_str())])
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("indexarr: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("indexarr returned {}", resp.status()),
+        ));
+    }
+
+    let filename = resp
+        .headers()
+        .get(axum::http::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(extract_filename)
+        .unwrap_or_else(|| format!("release-{id}.nzb"));
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("read body: {e}")))?;
+
+    let stem = Path::new(&filename)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&filename);
+
+    let mut job = nzb_web::nzb_core::nzb_parser::parse_nzb(stem, &bytes)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("parse: {e}")))?;
+
+    let base = PathBuf::from(env_or("BASE_DIR", "/downloads"));
+    job.work_dir = base.join("incomplete").join(&job.id);
+    job.output_dir = base.join("complete").join(stem);
+    let job_id = job.id.clone();
+
+    st.queue
+        .add_job(job, Some(bytes.to_vec()))
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("add_job: {e}")))?;
+
+    Ok(Json(serde_json::json!({
+        "id": job_id,
+        "name": stem,
+        "bytes": bytes.len(),
+    })))
+}
+
+/// Pull `filename="..."` (or unquoted) out of a Content-Disposition header.
+fn extract_filename(cd: &str) -> Option<String> {
+    let idx = cd.to_lowercase().find("filename=")?;
+    let tail = &cd[idx + "filename=".len()..];
+    let tail = tail.trim_start_matches(' ');
+    if let Some(stripped) = tail.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(stripped[..end].to_string())
+    } else {
+        let end = tail.find(';').unwrap_or(tail.len());
+        Some(tail[..end].trim().to_string())
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -289,7 +436,13 @@ async fn main() -> anyhow::Result<()> {
         30,    // article_timeout_secs
     );
 
-    let state = AppState { queue };
+    let indexarr = IndexarrClient::from_env();
+    if !indexarr.is_configured() {
+        warn!("INDEXARR_API_KEY not set — search will return 'not configured'");
+    } else {
+        info!(base = %indexarr.base_url, "indexarr search enabled");
+    }
+    let state = AppState { queue, indexarr };
 
     let listen_port: u16 = env_parse("LISTEN_PORT", 8080);
     let static_dir = env_or("STATIC_DIR", "/app/static");
@@ -299,6 +452,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/upload", post(h_upload))
         .route("/api/jobs/{id}", delete(h_cancel))
         .route("/api/search", get(h_search))
+        .route("/api/grab/{id}", post(h_grab))
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
 
