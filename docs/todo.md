@@ -16,6 +16,21 @@ Rough priority order, top = next. Scratchpad. Prune as things change.
 - [x] **app-server: SQLite persistence** — users, locks, bytes_total,
       total_sessions, last_seen all survive restart. Runtime
       active_sessions resets on restart by design.
+- [x] **Throughput surfaced per-user** — bytes/sec derived in app-server
+      from successive activity reports; admin UI renders a Rate column
+      and "Conns / Max" to distinguish open TCP sockets from active
+      downloading.
+- [x] **Session keys** — gui exchanges password for an opaque key at the
+      app-server on login; proxy sees the key as the NNTP AUTHINFO PASS.
+      Real password never reaches the proxy. Admin UI lists sessions per
+      user; locking a user revokes them. 30-day default TTL; background
+      purge of expired keys.
+- [x] **Idle upstream connection pool** — authenticated provider
+      connections are parked on clean QUIT, reused on next acquire.
+      Permits travel with the connection so provider cap is honoured
+      across active+idle combined. 60s TTL sweep.
+- [x] **Tests** — 12 tests between nntp-proxy (UserPool unit) and
+      app-server (Store unit + HTTP integration via tower::oneshot).
 
 ## Known issues in the current POC
 
@@ -39,18 +54,29 @@ Rough priority order, top = next. Scratchpad. Prune as things change.
       logs "patch was not used" warnings on every build. Expected; only
       worth fixing when local libs introduce a breaking change we need.
 
+## Next up — pre-internet-rollout
+
+- [ ] **NNTPS listener on the proxy (:563).** Plaintext AUTHINFO PASS is
+      fine for localhost compose; once the proxy's on the public
+      internet, TLS is mandatory. Self-signed cert generated at startup
+      in `/data/tls/`, persists across restarts.
+- [ ] **Cert fingerprint pinning in the bundled client.** We control the
+      binaries — embed the expected fingerprint at build time (or fetch
+      it once at install via a rendezvous URL). rustls
+      `ServerCertVerifier` checks fingerprint only; no CA chain, no
+      Let's Encrypt, no DNS dance.
+- [ ] **Logout stops in-flight downloads.** `update_servers([])` removes
+      configured servers but existing per-job workers hold connections
+      until the current article finishes. Either drain via `remove_job`
+      on every active job in `h_logout`, or introduce a Pause feature
+      that preserves the queue for resume-on-next-login.
+- [ ] **Stream multi-line bodies.** `pool.rs::read_multiline_body()`
+      currently buffers the whole article (up to ~750 KB) before
+      forwarding. Swap to line-by-line forwarding so peak memory per
+      session drops from article size to line size.
+
 ## Near-term — make it less of a toy
 
-- [ ] **Logout should stop in-flight downloads.** `update_servers([])`
-      removes configured servers but existing per-job workers hold their
-      connections until the current article finishes. Adding
-      `remove_job` for every active job in `h_logout` fixes it — but at
-      the cost of progress. Alternative: a Pause feature that preserves
-      the queue and resumes on next login.
-- [ ] **"active_sessions" is misleading when connections are idle-pooled.**
-      The count includes TCP connections that nzb-web's pool holds open
-      for reuse between downloads. Either rename to "open_connections"
-      or derive activity from recent byte rate.
 - [ ] **Per-user web login on the gui.** Username/password → session token
       → API calls authenticated. Same credentials the user gets when admin
       creates them. Removes the shared-credentials hack in compose env.
