@@ -1,33 +1,45 @@
-//! HTTP client for the gui → app-server `validate` call.
+//! HTTP client for gui → app-server.
+//!
+//! Uses the session-key flow: login trades username/password for a
+//! session_key which is then used as the NNTP AUTHINFO password. The user's
+//! real password never touches the proxy.
 
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct AppClient {
     base_url: String,
-    token: String,
+    /// Unused for auth endpoints (they're public), used only if we ever add
+    /// proxy-ish calls here. Kept for symmetry.
+    _proxy_token: String,
     http: reqwest::Client,
 }
 
 #[derive(Serialize)]
-struct ValidateBody<'a> {
+struct LoginBody<'a> {
     username: &'a str,
     password: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ValidateResponse {
-    pub allowed: bool,
+pub struct LoginResponse {
+    pub session_key: String,
+    pub username: String,
     pub max_connections: u32,
     #[serde(default)]
-    pub reason: Option<String>,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Serialize)]
+struct LogoutBody<'a> {
+    session_key: &'a str,
 }
 
 impl AppClient {
-    pub fn new(base_url: String, token: String) -> Self {
+    pub fn new(base_url: String, proxy_token: String) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            token,
+            _proxy_token: proxy_token,
             http: reqwest::Client::builder()
                 .user_agent("nzbservice-gui/0.1")
                 .timeout(std::time::Duration::from_secs(5))
@@ -40,20 +52,35 @@ impl AppClient {
         !self.base_url.is_empty()
     }
 
-    pub async fn validate(
+    /// Exchange user creds for a session key. Returns Err on wrong password
+    /// or unreachable app-server.
+    pub async fn login(
         &self,
         username: &str,
         password: &str,
-    ) -> anyhow::Result<ValidateResponse> {
-        let url = format!("{}/api/proxy/validate", self.base_url);
+    ) -> anyhow::Result<LoginResponse> {
+        let url = format!("{}/api/auth/login", self.base_url);
         let resp = self
             .http
             .post(&url)
-            .bearer_auth(&self.token)
-            .json(&ValidateBody { username, password })
+            .json(&LoginBody { username, password })
             .send()
-            .await?
-            .error_for_status()?;
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("app-server login failed: {}", resp.status());
+        }
         Ok(resp.json().await?)
+    }
+
+    /// Revoke a previously-minted session key.
+    pub async fn logout(&self, session_key: &str) -> anyhow::Result<()> {
+        let url = format!("{}/api/auth/logout", self.base_url);
+        let _ = self
+            .http
+            .post(&url)
+            .json(&LogoutBody { session_key })
+            .send()
+            .await?;
+        Ok(())
     }
 }

@@ -49,6 +49,13 @@ use crate::app_client::AppClient;
 struct Session {
     username: String,
     max_connections: u32,
+    /// Opaque session key minted by app-server. Used as the NNTP AUTHINFO PASS.
+    /// Not serialised to HTTP responses — clients only need to know they're
+    /// logged in.
+    #[serde(skip)]
+    session_key: String,
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Clone)]
@@ -168,35 +175,32 @@ async fn h_login(
     if !st.app_client.is_configured() {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "app-server not configured".into()));
     }
+    // Trade password for a session key — the key is what the proxy sees from
+    // here on; the real password never leaves this function.
     let resp = st
         .app_client
-        .validate(&body.username, &body.password)
+        .login(&body.username, &body.password)
         .await
-        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("validate: {e}")))?;
-
-    if !resp.allowed {
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            resp.reason.unwrap_or_else(|| "invalid credentials".into()),
-        ));
-    }
+        .map_err(|_| (StatusCode::UNAUTHORIZED, "invalid credentials".into()))?;
 
     let session = Session {
-        username: body.username.clone(),
+        username: resp.username.clone(),
         max_connections: resp.max_connections,
+        session_key: resp.session_key.clone(),
+        expires_at: resp.expires_at,
     };
 
-    // Hot-swap the QueueManager's server list with this user's creds.
+    // Hot-swap the QueueManager's server list. PASS = session_key.
     let server = build_user_server(
         &st.nntp_defaults,
-        &body.username,
-        &body.password,
+        &resp.username,
+        &resp.session_key,
         resp.max_connections,
     );
     st.queue.update_servers(vec![server]);
 
     *st.session.write() = Some(session.clone());
-    info!(user = %body.username, max = resp.max_connections, "login");
+    info!(user = %resp.username, max = resp.max_connections, "login (session key minted)");
     Ok(Json(session))
 }
 
@@ -204,8 +208,10 @@ async fn h_logout(State(st): State<AppState>) -> Json<serde_json::Value> {
     let was = st.session.write().take();
     if let Some(s) = was {
         info!(user = %s.username, "logout");
+        // Best-effort revocation on app-server. Fire-and-forget is fine —
+        // the key's TTL guarantees eventual expiry.
+        let _ = st.app_client.logout(&s.session_key).await;
     }
-    // Empty servers → in-flight upstream connections die on next reconnect.
     st.queue.update_servers(vec![]);
     Json(serde_json::json!({ "ok": true }))
 }
@@ -558,22 +564,24 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Optional auto-login: if BOOTSTRAP_USER/PASS are set (compose default),
-    // log in on startup so things work out of the box.
+    // log in on startup so things work out of the box. Uses the same
+    // session-key flow as /api/login.
     if let (Ok(u), Ok(p)) = (std::env::var("BOOTSTRAP_USER"), std::env::var("BOOTSTRAP_PASS"))
         && !u.is_empty()
         && app_client.is_configured()
     {
-        match app_client.validate(&u, &p).await {
-            Ok(r) if r.allowed => {
-                let server = build_user_server(&nntp_defaults, &u, &p, r.max_connections);
+        match app_client.login(&u, &p).await {
+            Ok(r) => {
+                let server = build_user_server(&nntp_defaults, &r.username, &r.session_key, r.max_connections);
                 queue.update_servers(vec![server]);
                 *state.session.write() = Some(Session {
-                    username: u.clone(),
+                    username: r.username.clone(),
                     max_connections: r.max_connections,
+                    session_key: r.session_key,
+                    expires_at: r.expires_at,
                 });
-                info!(user = %u, max = r.max_connections, "auto-logged in via BOOTSTRAP_USER");
+                info!(user = %r.username, max = r.max_connections, "auto-logged in via BOOTSTRAP_USER");
             }
-            Ok(r) => warn!("bootstrap auto-login rejected: {:?}", r.reason),
             Err(e) => warn!("bootstrap auto-login failed: {e}"),
         }
     }

@@ -109,6 +109,16 @@ impl Store {
                 bytes_total      INTEGER NOT NULL DEFAULT 0,
                 total_sessions   INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                session_key      TEXT PRIMARY KEY,
+                username         TEXT NOT NULL,
+                created_at       TEXT NOT NULL,
+                last_used        TEXT NOT NULL,
+                expires_at       TEXT,
+                FOREIGN KEY (username) REFERENCES users(username) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(username);
             ",
         )?;
         info!(path = %path.as_ref().display(), "SQLite store ready");
@@ -269,6 +279,131 @@ impl Store {
         tx.commit().expect("commit activity tx");
     }
 
+    // ── Sessions ────────────────────────────────────────────────────────────
+
+    /// Verify `username + password` and mint a new session key. Returns the
+    /// 64-hex-character key on success; None if the user doesn't exist, is
+    /// locked, or the password is wrong.
+    pub fn login(&self, username: &str, password: &str, ttl_secs: Option<u64>) -> Option<String> {
+        let user = self.get(username)?;
+        if user.locked || !user.verify_password(password) {
+            return None;
+        }
+        let key: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(48)
+            .map(char::from)
+            .collect();
+        let now_str = Utc::now().to_rfc3339();
+        let expires = ttl_secs.map(|t| (Utc::now() + chrono::Duration::seconds(t as i64)).to_rfc3339());
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO sessions (session_key, username, created_at, last_used, expires_at)
+             VALUES (?1, ?2, ?3, ?3, ?4)",
+            params![key, username, now_str, expires],
+        )
+        .ok()?;
+        Some(key)
+    }
+
+    /// Look up a session key. Returns the owning user *if* the key is valid
+    /// and the user isn't locked. Also refreshes `last_used`.
+    pub fn validate_session(&self, session_key: &str) -> Option<User> {
+        let conn = self.conn.lock();
+        let now_str = Utc::now().to_rfc3339();
+
+        // Pull the session row, check expiry
+        let row: Option<(String, Option<String>)> = conn
+            .query_row(
+                "SELECT username, expires_at FROM sessions WHERE session_key = ?",
+                [session_key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .ok()
+            .flatten();
+        let (username, expires_at) = row?;
+
+        if let Some(exp) = expires_at.as_ref() {
+            if let Ok(dt) = DateTime::parse_from_rfc3339(exp) {
+                if Utc::now() > dt.with_timezone(&Utc) {
+                    let _ = conn.execute(
+                        "DELETE FROM sessions WHERE session_key = ?",
+                        [session_key],
+                    );
+                    return None;
+                }
+            }
+        }
+
+        // Drop the conn lock before calling self.get (which takes it again)
+        let _ = conn.execute(
+            "UPDATE sessions SET last_used = ?1 WHERE session_key = ?2",
+            params![now_str, session_key],
+        );
+        drop(conn);
+
+        let user = self.get(&username)?;
+        if user.locked { None } else { Some(user) }
+    }
+
+    /// Revoke a session key (logout). Returns true if one was deleted.
+    pub fn revoke_session(&self, session_key: &str) -> bool {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM sessions WHERE session_key = ?", [session_key])
+            .unwrap_or(0)
+            == 1
+    }
+
+    /// Revoke *all* sessions for a user. Called when a user is locked.
+    pub fn revoke_sessions_for_user(&self, username: &str) -> usize {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM sessions WHERE username = ?", [username])
+            .unwrap_or(0)
+    }
+
+    /// Sessions for this user (for admin display).
+    pub fn sessions_for_user(&self, username: &str) -> Vec<SessionInfo> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_key, created_at, last_used, expires_at
+                 FROM sessions WHERE username = ? ORDER BY last_used DESC",
+            )
+            .expect("prepare sessions_for_user");
+        stmt.query_map([username], |row| {
+            Ok(SessionInfo {
+                key_prefix: {
+                    let k: String = row.get(0)?;
+                    k.chars().take(8).collect()
+                },
+                created_at: row.get::<_, String>(1).ok().and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+                last_used: row.get::<_, String>(2).ok().and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+                expires_at: row.get::<_, Option<String>>(3).ok().flatten().and_then(|s| {
+                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                }),
+            })
+        })
+        .expect("query sessions_for_user")
+        .filter_map(Result::ok)
+        .collect()
+    }
+
+    /// Purge expired sessions. Called periodically.
+    pub fn purge_expired_sessions(&self) -> usize {
+        let conn = self.conn.lock();
+        let now_str = Utc::now().to_rfc3339();
+        conn.execute(
+            "DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?",
+            [now_str],
+        )
+        .unwrap_or(0)
+    }
+
     /// Decay stale rates. Called periodically so users that stop reporting
     /// don't keep showing an old bytes_per_sec.
     pub fn decay_stale_rates(&self, max_age_secs: u64) {
@@ -311,6 +446,14 @@ fn row_to_user(
         bytes_total: row.get::<_, i64>(6)? as u64,
         total_sessions: row.get::<_, i64>(7)? as u64,
     })
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionInfo {
+    pub key_prefix: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub last_used: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Per-user activity slice posted by the proxy each interval.

@@ -36,6 +36,7 @@ reqwest       = { version = "0.12", default-features = false, features = ["rustl
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
 parking_lot   = "0.12"
+chrono        = { version = "0.4", features = ["serde"] }
 
 # Logging
 tracing              = "0.1"

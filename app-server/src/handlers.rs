@@ -107,8 +107,17 @@ pub async fn h_admin_set_lock(
     if !st.store.set_locked(&username, body.locked) {
         return Err((StatusCode::NOT_FOUND, format!("no such user '{username}'")));
     }
-    info!(%username, locked = body.locked, "lock state changed");
-    Ok(Json(serde_json::json!({ "ok": true, "locked": body.locked })))
+    let revoked = if body.locked {
+        st.store.revoke_sessions_for_user(&username)
+    } else {
+        0
+    };
+    info!(%username, locked = body.locked, revoked_sessions = revoked, "lock state changed");
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "locked": body.locked,
+        "revoked_sessions": revoked,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -135,6 +144,10 @@ pub async fn h_admin_set_max(
 #[derive(Deserialize)]
 pub struct ValidateBody {
     pub username: String,
+    /// Either a session key minted via `/api/auth/login` OR the user's real
+    /// password (legacy). Session keys are preferred; password fallback stays
+    /// so a clean-slate stack works immediately out of the box and during
+    /// the transition.
     pub password: String,
 }
 
@@ -143,12 +156,40 @@ pub struct ValidateResponse {
     pub allowed: bool,
     pub max_connections: u32,
     pub reason: Option<String>,
+    /// `session` if the credential was a session key, `password` if it was
+    /// the user's real password. Useful for the proxy to log and for
+    /// tightening later (e.g. reject `password` in production).
+    pub auth_method: Option<String>,
 }
 
 pub async fn h_proxy_validate(
     State(st): State<Arc<AppState>>,
     Json(body): Json<ValidateBody>,
 ) -> Json<ValidateResponse> {
+    // 1. Try as a session key first.
+    if let Some(user) = st.store.validate_session(&body.password) {
+        if user.username != body.username {
+            warn!(
+                sent_user = %body.username,
+                actual_user = %user.username,
+                "session key belongs to a different user"
+            );
+            return Json(ValidateResponse {
+                allowed: false,
+                max_connections: 0,
+                reason: Some("invalid credentials".into()),
+                auth_method: None,
+            });
+        }
+        return Json(ValidateResponse {
+            allowed: true,
+            max_connections: user.max_connections,
+            reason: None,
+            auth_method: Some("session".into()),
+        });
+    }
+
+    // 2. Fall back to raw password.
     let user = match st.store.get(&body.username) {
         Some(u) => u,
         None => {
@@ -156,6 +197,7 @@ pub async fn h_proxy_validate(
                 allowed: false,
                 max_connections: 0,
                 reason: Some("unknown user".into()),
+                auth_method: None,
             });
         }
     };
@@ -165,6 +207,7 @@ pub async fn h_proxy_validate(
             allowed: false,
             max_connections: user.max_connections,
             reason: Some("account locked".into()),
+            auth_method: None,
         });
     }
     if !user.verify_password(&body.password) {
@@ -173,13 +216,76 @@ pub async fn h_proxy_validate(
             allowed: false,
             max_connections: 0,
             reason: Some("invalid credentials".into()),
+            auth_method: None,
         });
     }
     Json(ValidateResponse {
         allowed: true,
         max_connections: user.max_connections,
         reason: None,
+        auth_method: Some("password".into()),
     })
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Auth (gui → app-server): mint + revoke session keys
+// ────────────────────────────────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct AuthLoginBody {
+    pub username: String,
+    pub password: String,
+    /// Optional TTL override. None (or omitted) means the server default.
+    pub ttl_secs: Option<u64>,
+}
+
+#[derive(Serialize)]
+pub struct AuthLoginResponse {
+    pub session_key: String,
+    pub username: String,
+    pub max_connections: u32,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub async fn h_auth_login(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AuthLoginBody>,
+) -> Result<Json<AuthLoginResponse>, (StatusCode, String)> {
+    let ttl = body.ttl_secs.or(Some(st.config.session_ttl_secs));
+    match st.store.login(&body.username, &body.password, ttl) {
+        Some(key) => {
+            let user = st.store.get(&body.username).expect("just verified");
+            let expires_at = ttl.map(|t| chrono::Utc::now() + chrono::Duration::seconds(t as i64));
+            info!(user = %body.username, "session minted");
+            Ok(Json(AuthLoginResponse {
+                session_key: key,
+                username: user.username,
+                max_connections: user.max_connections,
+                expires_at,
+            }))
+        }
+        None => Err((StatusCode::UNAUTHORIZED, "invalid credentials".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AuthLogoutBody {
+    pub session_key: String,
+}
+
+pub async fn h_auth_logout(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AuthLogoutBody>,
+) -> Json<serde_json::Value> {
+    let revoked = st.store.revoke_session(&body.session_key);
+    Json(serde_json::json!({ "ok": revoked }))
+}
+
+pub async fn h_admin_user_sessions(
+    State(st): State<Arc<AppState>>,
+    Path(username): Path<String>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "sessions": st.store.sessions_for_user(&username) }))
 }
 
 #[derive(Deserialize)]

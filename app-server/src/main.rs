@@ -13,8 +13,8 @@ use tracing::info;
 
 use crate::handlers::{
     h_admin_create_user, h_admin_delete_user, h_admin_set_lock, h_admin_set_max,
-    h_admin_users, h_health, h_proxy_activity, h_proxy_locked, h_proxy_validate,
-    require_admin, require_proxy,
+    h_admin_user_sessions, h_admin_users, h_auth_login, h_auth_logout, h_health,
+    h_proxy_activity, h_proxy_locked, h_proxy_validate, require_admin, require_proxy,
 };
 use crate::state::{AppState, Config};
 use crate::store::Store;
@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config {
         admin_token: env_or("ADMIN_TOKEN", "admin-dev-token"),
         proxy_token: env_or("PROXY_TOKEN", "proxy-dev-token"),
+        session_ttl_secs: env_parse("SESSION_TTL_SECS", 30 * 24 * 60 * 60), // 30 days
     };
 
     let db_path = env_or("DATABASE_PATH", "/data/app-server.db");
@@ -85,6 +86,22 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Purge expired session keys every 5 minutes.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            tick.tick().await; // skip immediate
+            loop {
+                tick.tick().await;
+                let n = state.store.purge_expired_sessions();
+                if n > 0 {
+                    tracing::info!(purged = n, "expired sessions purged");
+                }
+            }
+        });
+    }
+
     let admin_routes = Router::new()
         .route("/api/admin/users", get(h_admin_users).post(h_admin_create_user))
         .route("/api/admin/users/{username}", delete(h_admin_delete_user))
@@ -93,10 +110,16 @@ async fn main() -> anyhow::Result<()> {
             "/api/admin/users/{username}/max_connections",
             put(h_admin_set_max),
         )
+        .route("/api/admin/users/{username}/sessions", get(h_admin_user_sessions))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_admin,
         ));
+
+    // Public auth routes (no bearer token — the password IS the auth).
+    let auth_routes = Router::new()
+        .route("/api/auth/login", post(h_auth_login))
+        .route("/api/auth/logout", post(h_auth_logout));
 
     let proxy_routes = Router::new()
         .route("/api/proxy/validate", post(h_proxy_validate))
@@ -113,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/health", get(h_health))
         .merge(admin_routes)
         .merge(proxy_routes)
+        .merge(auth_routes)
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
 
