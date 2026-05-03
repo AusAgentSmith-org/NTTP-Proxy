@@ -44,10 +44,8 @@ impl ProxyConfig {
             upstream_port: env::var("NNTP_PORT")
                 .unwrap_or_else(|_| "563".into())
                 .parse()?,
-            upstream_user: env::var("NNTP_USER")
-                .unwrap_or_else(|_| "sprooty".into()),
-            upstream_pass: env::var("NNTP_PASS")
-                .unwrap_or_else(|_| "3MemP7tRt".into()),
+            upstream_user: env::var("NNTP_USER").unwrap_or_else(|_| "sprooty".into()),
+            upstream_pass: env::var("NNTP_PASS").unwrap_or_else(|_| "3MemP7tRt".into()),
             max_connections: env::var("NNTP_CONNECTIONS")
                 .unwrap_or_else(|_| "15".into())
                 .parse()?,

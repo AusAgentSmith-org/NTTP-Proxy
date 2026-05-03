@@ -225,7 +225,10 @@ impl UpstreamPool {
     }
 
     async fn connect(&self) -> anyhow::Result<PooledStream> {
-        let addr = format!("{}:{}", self.config.upstream_host, self.config.upstream_port);
+        let addr = format!(
+            "{}:{}",
+            self.config.upstream_host, self.config.upstream_port
+        );
         let tcp = TcpStream::connect(&addr).await?;
         tcp.set_nodelay(true).ok();
 
@@ -241,7 +244,10 @@ impl UpstreamPool {
         stream.read_line(&mut banner).await?;
         let code = parse_code(&banner);
         if !matches!(code, 200 | 201) {
-            anyhow::bail!("unexpected upstream welcome (code {code}): {}", banner.trim());
+            anyhow::bail!(
+                "unexpected upstream welcome (code {code}): {}",
+                banner.trim()
+            );
         }
         debug!("upstream welcome: {}", banner.trim());
 

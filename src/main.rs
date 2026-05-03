@@ -65,7 +65,11 @@ async fn main() -> anyhow::Result<()> {
         // Periodic activity reporter
         spawn_activity_reporter(c.clone(), Arc::clone(&user_pool), cfg.report_interval_secs);
         // Periodic locked-user poll → drop sessions for locked users
-        spawn_lock_poller(c.clone(), Arc::clone(&user_pool), cfg.lock_poll_interval_secs);
+        spawn_lock_poller(
+            c.clone(),
+            Arc::clone(&user_pool),
+            cfg.lock_poll_interval_secs,
+        );
         Some(c)
     } else {
         None
@@ -187,11 +191,7 @@ async fn accept_tls_loop(
     }
 }
 
-fn spawn_activity_reporter(
-    app: AppClient,
-    user_pool: Arc<UserPool>,
-    interval_secs: u64,
-) {
+fn spawn_activity_reporter(app: AppClient, user_pool: Arc<UserPool>, interval_secs: u64) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
         ticker.tick().await; // skip the immediate tick

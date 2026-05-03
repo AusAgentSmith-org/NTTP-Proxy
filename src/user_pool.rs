@@ -105,7 +105,9 @@ impl UserPool {
 
         {
             let mut g = self.inner.lock();
-            let slot = g.entry(user.to_string()).or_insert_with(|| UserSlot::new(cap));
+            let slot = g
+                .entry(user.to_string())
+                .or_insert_with(|| UserSlot::new(cap));
             slot.sessions.insert(session_id, cancel_tx);
             slot.new_sessions_delta = slot.new_sessions_delta.saturating_add(1);
         }
@@ -196,10 +198,9 @@ mod tests {
         let (_g1, _c1) = pool.acquire("bob", 1).await.unwrap();
         // A second acquire must block because the cap is 1 and g1 is live.
         let pool2 = pool.clone();
-        let timed = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            async move { pool2.acquire("bob", 1).await },
-        )
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(50), async move {
+            pool2.acquire("bob", 1).await
+        })
         .await;
         assert!(timed.is_err(), "second acquire should have blocked");
     }

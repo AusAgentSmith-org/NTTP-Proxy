@@ -273,8 +273,5 @@ where
 
 /// Whether an NNTP response code is followed by a dot-terminated multi-line body.
 fn is_multiline(code: u16) -> bool {
-    matches!(
-        code,
-        215 | 220 | 221 | 222 | 224 | 225 | 230 | 231 | 282
-    )
+    matches!(code, 215 | 220 | 221 | 222 | 224 | 225 | 230 | 231 | 282)
 }

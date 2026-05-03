@@ -74,10 +74,19 @@ pub async fn h_admin_create_user(
     Json(body): Json<CreateUserBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     if body.username.is_empty() || body.password.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "username and password required".into()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "username and password required".into(),
+        ));
     }
-    if !st.store.create(body.username.clone(), &body.password, body.max_connections) {
-        return Err((StatusCode::CONFLICT, format!("user '{}' exists", body.username)));
+    if !st
+        .store
+        .create(body.username.clone(), &body.password, body.max_connections)
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("user '{}' exists", body.username),
+        ));
     }
     info!(user = %body.username, max = body.max_connections, "user created");
     Ok(Json(serde_json::json!({ "ok": true })))
@@ -130,7 +139,10 @@ pub async fn h_admin_set_max(
     Path(username): Path<String>,
     Json(body): Json<MaxConnsBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    if !st.store.set_max_connections(&username, body.max_connections) {
+    if !st
+        .store
+        .set_max_connections(&username, body.max_connections)
+    {
         return Err((StatusCode::NOT_FOUND, format!("no such user '{username}'")));
     }
     info!(%username, max = body.max_connections, "max_connections updated");
@@ -329,17 +341,19 @@ pub async fn h_fingerprint(State(st): State<Arc<AppState>>) -> Response {
             let fp = s.trim().to_string();
             let body = serde_json::json!({ "fingerprint": fp, "algorithm": "sha256" });
             let mut r = Response::new(Body::from(body.to_string()));
-            r.headers_mut()
-                .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            r.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
             r
         }
         Err(_) => {
-            let mut r = Response::new(Body::from(
-                r#"{"error":"fingerprint not available yet"}"#,
-            ));
+            let mut r = Response::new(Body::from(r#"{"error":"fingerprint not available yet"}"#));
             *r.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
-            r.headers_mut()
-                .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+            r.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
             r
         }
     }

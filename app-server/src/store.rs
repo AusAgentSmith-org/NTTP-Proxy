@@ -295,7 +295,8 @@ impl Store {
             .map(char::from)
             .collect();
         let now_str = Utc::now().to_rfc3339();
-        let expires = ttl_secs.map(|t| (Utc::now() + chrono::Duration::seconds(t as i64)).to_rfc3339());
+        let expires =
+            ttl_secs.map(|t| (Utc::now() + chrono::Duration::seconds(t as i64)).to_rfc3339());
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO sessions (session_key, username, created_at, last_used, expires_at)
@@ -327,10 +328,8 @@ impl Store {
         if let Some(exp) = expires_at.as_ref() {
             if let Ok(dt) = DateTime::parse_from_rfc3339(exp) {
                 if Utc::now() > dt.with_timezone(&Utc) {
-                    let _ = conn.execute(
-                        "DELETE FROM sessions WHERE session_key = ?",
-                        [session_key],
-                    );
+                    let _ =
+                        conn.execute("DELETE FROM sessions WHERE session_key = ?", [session_key]);
                     return None;
                 }
             }
@@ -378,14 +377,24 @@ impl Store {
                     k.chars().take(8).collect()
                 },
                 created_at: row.get::<_, String>(1).ok().and_then(|s| {
-                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
                 }),
                 last_used: row.get::<_, String>(2).ok().and_then(|s| {
-                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
+                    DateTime::parse_from_rfc3339(&s)
+                        .ok()
+                        .map(|d| d.with_timezone(&Utc))
                 }),
-                expires_at: row.get::<_, Option<String>>(3).ok().flatten().and_then(|s| {
-                    DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc))
-                }),
+                expires_at: row
+                    .get::<_, Option<String>>(3)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| {
+                        DateTime::parse_from_rfc3339(&s)
+                            .ok()
+                            .map(|d| d.with_timezone(&Utc))
+                    }),
             })
         })
         .expect("query sessions_for_user")
@@ -484,7 +493,10 @@ mod tests {
         let (store, _f) = tmp_store();
         assert!(store.list().is_empty());
         assert!(store.create("alice".into(), "pw", 5));
-        assert!(!store.create("alice".into(), "again", 10), "duplicate must fail");
+        assert!(
+            !store.create("alice".into(), "again", 10),
+            "duplicate must fail"
+        );
         let u = store.get("alice").unwrap();
         assert_eq!(u.max_connections, 5);
         assert!(u.verify_password("pw"));

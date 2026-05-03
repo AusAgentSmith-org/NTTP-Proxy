@@ -63,7 +63,10 @@ pub fn load_or_generate(tls_dir: &Path) -> anyhow::Result<ServerTls> {
 }
 
 fn generate_to_disk(cert_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<()> {
-    info!("generating self-signed NNTPS cert at {}", cert_path.display());
+    info!(
+        "generating self-signed NNTPS cert at {}",
+        cert_path.display()
+    );
     // rcgen::generate_simple_self_signed does NotBefore=now, NotAfter=now+10y.
     // The SAN list must be non-empty but can be anything; clients won't verify it.
     let cert =

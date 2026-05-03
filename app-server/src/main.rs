@@ -5,17 +5,16 @@ mod store;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::middleware;
 use axum::routing::{delete, get, post, put};
-use axum::Router;
 use tower_http::services::ServeDir;
 use tracing::info;
 
 use crate::handlers::{
     h_admin_create_user, h_admin_delete_user, h_admin_set_lock, h_admin_set_max,
-    h_admin_user_sessions, h_admin_users, h_auth_login, h_auth_logout, h_fingerprint,
-    h_health, h_proxy_activity, h_proxy_locked, h_proxy_validate, require_admin,
-    require_proxy,
+    h_admin_user_sessions, h_admin_users, h_auth_login, h_auth_logout, h_fingerprint, h_health,
+    h_proxy_activity, h_proxy_locked, h_proxy_validate, require_admin, require_proxy,
 };
 use crate::state::{AppState, Config};
 use crate::store::Store;
@@ -112,9 +111,7 @@ async fn main() -> anyhow::Result<()> {
 
     let listen_port: u16 = env_parse("LISTEN_PORT", 8090);
     let addr: SocketAddr = ([0, 0, 0, 0], listen_port).into();
-    println!(
-        "nzbservice-app-server starting: listen={addr}  static={static_dir}  logs={log_dir}"
-    );
+    println!("nzbservice-app-server starting: listen={addr}  static={static_dir}  logs={log_dir}");
     info!(%addr, "listening");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -127,11 +124,20 @@ async fn main() -> anyhow::Result<()> {
 /// `.with_state(...)` (and `.fallback_service(...)` if serving static).
 fn build_api_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
     let admin_routes = Router::new()
-        .route("/api/admin/users", get(h_admin_users).post(h_admin_create_user))
+        .route(
+            "/api/admin/users",
+            get(h_admin_users).post(h_admin_create_user),
+        )
         .route("/api/admin/users/{username}", delete(h_admin_delete_user))
         .route("/api/admin/users/{username}/lock", put(h_admin_set_lock))
-        .route("/api/admin/users/{username}/max_connections", put(h_admin_set_max))
-        .route("/api/admin/users/{username}/sessions", get(h_admin_user_sessions))
+        .route(
+            "/api/admin/users/{username}/max_connections",
+            put(h_admin_set_max),
+        )
+        .route(
+            "/api/admin/users/{username}/sessions",
+            get(h_admin_user_sessions),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), require_admin));
 
     let auth_routes = Router::new()
@@ -184,11 +190,18 @@ mod integration_tests {
     }
 
     async fn body_json(res: axum::response::Response) -> serde_json::Value {
-        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX).await.unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
 
-    fn req_json(method: &str, path: &str, bearer: Option<&str>, body: serde_json::Value) -> Request<Body> {
+    fn req_json(
+        method: &str,
+        path: &str,
+        bearer: Option<&str>,
+        body: serde_json::Value,
+    ) -> Request<Body> {
         let mut b = Request::builder()
             .method(method)
             .uri(path)
@@ -196,7 +209,8 @@ mod integration_tests {
         if let Some(t) = bearer {
             b = b.header("authorization", format!("Bearer {t}"));
         }
-        b.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap()
+        b.body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
     }
 
     #[tokio::test]
@@ -286,7 +300,12 @@ mod integration_tests {
         let (app, _state, _tmp) = build_test_app();
         let res = app
             .clone()
-            .oneshot(Request::builder().uri("/api/fingerprint").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fingerprint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -308,7 +327,12 @@ mod integration_tests {
         let _ = state;
         let app2 = build_api_router(state.clone()).with_state(state);
         let res = app2
-            .oneshot(Request::builder().uri("/api/fingerprint").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/fingerprint")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -321,7 +345,12 @@ mod integration_tests {
     async fn admin_requires_bearer_token() {
         let (app, _state, _tmp) = build_test_app();
         let res = app
-            .oneshot(Request::builder().uri("/api/admin/users").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/users")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
